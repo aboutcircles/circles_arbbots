@@ -14,7 +14,14 @@
   "type": "commonjs",
   "description": "",
   "dependencies": {
+    "@balancer/sdk": "^1.1.0",
+    "@circles-sdk/adapter-ethers": "^0.15.1",
+    "@circles-sdk/data": "^0.15.1",
+    "@circles-sdk/profiles": "^0.15.1",
+    "@circles-sdk/sdk": "^0.15.1",
+    "@circles-sdk/utils": "^0.15.1",
     "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
     "express": "^4.21.2"
   },
   "devDependencies": {
