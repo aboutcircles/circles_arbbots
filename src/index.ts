@@ -1,13 +1,14 @@
-import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme, OrderQuoteRequest, OrderQuoteSideKindSell } from "@cowprotocol/cow-sdk";
-import { ethers } from "ethers";
+import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme } from "@cowprotocol/cow-sdk";
+import { ethers, Contract } from "ethers";
+import type { Web3Provider } from '@ethersproject/providers'
 import "dotenv/config";
-import { sign } from "crypto";
 
 // Load environment variables
 const chainId = SupportedChainId.GNOSIS_CHAIN
 const rpcUrl = process.env.RPC_URL!;
 const privateKey = process.env.PRIVATE_KEY!;
 const signerAddress = process.env.ARBBOT_ADDRESS!;
+const relayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
 
 // Initialize provider and wallet
 const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
@@ -45,46 +46,28 @@ async function createLimitOrder() {
 
     console.log(`InToken balance: ${sellAmount.toString()}`);
 
+    // Approve the relayer to spend the sellAmount
+    console.log("Approving relayer to spend InToken...");
+    await approveRelayer(tokenInAddress, sellAmount);
+
+
     // Define the minimum amount of OutToken you want to receive
     const minBuyAmount = sellAmount * BigInt(1); // 1:1 ratio
 
-    //get a quote
-    const quoteRequest: OrderQuoteRequest = {
-      sellToken: tokenInAddress,
-      buyToken: tokenOutAddress,
-      from: signerAddress,
-      receiver: signerAddress,
-      sellAmountBeforeFee: sellAmount.toString(),
-      kind: OrderQuoteSideKindSell.SELL,
-  };
-
-    const { quote } = await orderBookApi.getQuote(quoteRequest);
-
-      // And feeAmount must be set to 0
-      const feeAmount = '0'
-
-      const order: UnsignedOrder = {
-        ...quote,
+    // Define the order
+    const order: UnsignedOrder = {
+        sellToken: tokenInAddress,
+        buyToken: tokenOutAddress,
         sellAmount: sellAmount.toString(),
-        feeAmount,
-        receiver: signerAddress,
-      }
-
-
-    // // Define the order
-    // const order: UnsignedOrder = {
-    //     sellToken: tokenInAddress,
-    //     buyToken: tokenOutAddress,
-    //     sellAmount: sellAmount.toString(),
-    //     buyAmount: minBuyAmount.toString(),
-    //     validTo: Math.floor(Date.now() / 1000) + 3600, // Order valid for 1 hour
-    //     appData: "", // Optional metadata
-    //     feeAmount: "0", // Adjust if necessary
-    //     partiallyFillable: true,
-    //     kind: OrderKind.SELL, // "sell" means you're selling tokenIn for tokenOut
-    //     receiver: signerAddress, // Tokens will be sent back to the same address
-    //     // from: signerAddress,
-    // };
+        buyAmount: minBuyAmount.toString(),
+        validTo: Math.floor(Date.now() / 1000) + 3600, // Order valid for 1 hour
+        appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Optional metadata
+        feeAmount: "0", // Adjust if necessary
+        partiallyFillable: true,
+        kind: OrderKind.SELL, // "sell" means you're selling tokenIn for tokenOut
+        receiver: signerAddress, // Tokens will be sent back to the same address
+        // from: signerAddress,
+    };
 
     console.log("Signing the order...");
     const { signature, signingScheme } = await OrderSigningUtils.signOrder(order, chainId, wallet);
@@ -94,12 +77,38 @@ async function createLimitOrder() {
         const orderId = await orderBookApi.sendOrder({
             ...order,
             signature,
+            from: signerAddress,
+            appData: "{}",
             signingScheme: signingScheme as unknown as SigningScheme
         });
         console.log(`Order successfully submitted! Order ID: ${orderId}`);
     } catch (error) {
         console.error("Failed to submit the order:", error);
     }
+}
+
+// Approve relayer to spend tokens
+async function approveRelayer(tokenAddress: string, amount: bigint): Promise<void> {
+  const approveAbi = [
+      {
+          inputs: [
+              { name: '_spender', type: 'address' },
+              { name: '_value', type: 'uint256' },
+          ],
+          name: 'approve',
+          outputs: [{ type: 'bool' }],
+          stateMutability: 'nonpayable',
+          type: 'function',
+      },
+  ];
+
+  const signer = provider.getSigner();
+  const tokenContract = new Contract(tokenAddress, approveAbi, wallet);
+
+  const tx = await tokenContract.approve(relayerAddress, amount);
+  console.log('Approval transaction:', tx);
+  await tx.wait();
+  console.log('Approval transaction confirmed');
 }
 
 // Main function
