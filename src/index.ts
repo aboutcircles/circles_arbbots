@@ -1,6 +1,5 @@
 import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme } from "@cowprotocol/cow-sdk";
 import { ethers, Contract } from "ethers";
-import type { Web3Provider } from '@ethersproject/providers'
 import "dotenv/config";
 
 // Load environment variables
@@ -19,7 +18,7 @@ const orderBookApi = new OrderBookApi({ chainId });
 // const orderSigningUtils = new OrderSigningUtils();
 
 // Token addresses
-const tokenInAddress = "0xeed6d927047e29d762bfbaaba0816c5fd27911c5"; 
+const tokenInAddress = "0x159e6881e6ec370b46f2fe9fe75cbdfd8f7877b4"; 
 const tokenOutAddress = "0xc0d871bd13ebdf5c4ff059d8243fb38210608bd6";
 
 // Helper function to get token balance
@@ -47,12 +46,12 @@ async function createLimitOrder() {
     console.log(`InToken balance: ${sellAmount.toString()}`);
 
     // Approve the relayer to spend the sellAmount
-    console.log("Approving relayer to spend InToken...");
+    // console.log("Approving relayer to spend InToken...");
     await approveRelayer(tokenInAddress, sellAmount);
 
 
     // Define the minimum amount of OutToken you want to receive
-    const minBuyAmount = sellAmount * BigInt(1); // 1:1 ratio
+    const minBuyAmount = 50000000000 //sellAmount * BigInt(1); // 1:1 ratio
 
     // Define the order
     const order: UnsignedOrder = {
@@ -61,7 +60,7 @@ async function createLimitOrder() {
         sellAmount: sellAmount.toString(),
         buyAmount: minBuyAmount.toString(),
         validTo: Math.floor(Date.now() / 1000) + 3600, // Order valid for 1 hour
-        appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Optional metadata
+        appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Taken via instructions from API Schema
         feeAmount: "0", // Adjust if necessary
         partiallyFillable: true,
         kind: OrderKind.SELL, // "sell" means you're selling tokenIn for tokenOut
