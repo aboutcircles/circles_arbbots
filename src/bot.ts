@@ -27,6 +27,10 @@ enum ArbDirection {
     FROM_GROUP = "FROM_GROUP",
 }
 
+type PlaceOrderResult = 
+    | { success: true; orderId: string }
+    | { success: false; error: string };
+
 // Algorithm parameters
 const epsilon: number = 0.01;
 const validityCutoff: number = 60 * 60 * 1000; // 1 hour in ms
@@ -148,7 +152,7 @@ async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     console.log('Approval transaction confirmed');
   }
 
-async function placeOrder(maxSellAmount: number, member: GroupMember, direction: ArbDirection, limit: number): Promise<string> {
+async function placeOrder(maxSellAmount: number, member: GroupMember, direction: ArbDirection, limit: number): Promise<PlaceOrderResult> {
     // This wrapper places a partially fillable limit order that sells up to [maxSellAmount] of the inToken at a price of [limit] each. 
     // If [direction] is ArbDirection.TO_GROUP, the bot sells member tokens for group tokens. If [direction] is ArbDirection.FROM_GROUP, the bot sells group tokens for member tokens.
     // The function also takes care of the approval with the cowswap vaultrelayer and signing of the order.
@@ -192,14 +196,17 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
             signingScheme: signingScheme as unknown as SigningScheme
         });
         console.log(`Order successfully submitted! Order ID: ${orderId}`);
-        return orderId;
+        return {success: true, orderId: orderId};
 
     } catch (error) {
         console.error("Failed to submit the order:", error);
-        //  @TODO: Handle error properly
-        return "error";
+        let errorMessage = "Unknown error";
+        if (error instanceof Error) {
+            errorMessage = error.message;
+        }
+        return { success: false, error: errorMessage };
     }
-}
+    }
 
 async function main() {
     const membersCache = await initializeMembersCache();
@@ -233,14 +240,12 @@ async function main() {
         if (direction === ArbDirection.TO_GROUP) {
             const collateralAmount = (group.collateral.get(member) || 0) * bufferFraction;
             const target_redeemAmount = Math.min(collateralAmount, investingAmount);
-
             const redeemAmount = await redeemGroupTokens(target_redeemAmount, member);
-
-            var investingAmount = redeemAmount;
+            investingAmount = redeemAmount;
         } 
         
         // 6. Place order
-        await placeOrder(
+        placeOrder(
             investingAmount, 
             member,
             direction,
