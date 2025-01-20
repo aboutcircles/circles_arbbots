@@ -1,6 +1,6 @@
 // TypeScript code for the Circles arbitrage bot
-import { ethers } from "ethers";
-import { OrderBookApi } from "@cowprotocol/cow-sdk";
+import { ethers, Contract } from "ethers";
+import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme } from "@cowprotocol/cow-sdk";
 import "dotenv/config";
 
 
@@ -15,6 +15,7 @@ interface GroupMember {
     token_address: string;
     latest_price: number;
     is_approved: boolean;
+    approved_amount: 
 }
 
 interface MembersCache {
@@ -22,6 +23,10 @@ interface MembersCache {
     members: GroupMember[];
 }
 
+enum ArbDirection {
+    TO_GROUP = "TO_GROUP",
+    FROM_GROUP = "FROM_GROUP",
+}
 
 enum OrderStatus {
     OPEN = "OPEN",
@@ -35,7 +40,7 @@ interface Order {
 }
 
 
-// Constants
+// Algorithm parameters
 const epsilon: number = 0.01;
 const validityCutoff: number = 60 * 60 * 1000; // 1 hour in ms
 const waitingTime: number = 1000; // 1 second
@@ -44,12 +49,35 @@ const bufferFraction: number = 0.95;
 const maxOpenOrders: number = 10;
 
 // constants loaded from environment variables
+const chainId = SupportedChainId.GNOSIS_CHAIN
+const rpcUrl = process.env.RPC_URL!;
 const botAddress = process.env.BOT_ADDRESS!;
 const botPrivateKey = process.env.BOT_PRIVATE_KEY!;
 const postgresqlUrl = process.env.POSTGRESQL_URL!;
 const postgresqlPW = process.env.POSTGRESQL_PW!;
 const groupAddress = process.env.GROUP_ADDRESS!;
 const groupTokenAddress = process.env.GROUP_TOKEN_ADDRESS!;
+const CowSwapRelayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
+
+// ABIs
+const vaultRelayerApproveAbi = [
+    {
+        inputs: [
+            { name: '_spender', type: 'address' },
+            { name: '_value', type: 'uint256' },
+        ],
+        name: 'approve',
+        outputs: [{ type: 'bool' }],
+        stateMutability: 'nonpayable',
+        type: 'function',
+    },
+];
+
+// Initialize relevant objects
+const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+const wallet = new ethers.Wallet(botPrivateKey, provider);
+const orderBookApi = new OrderBookApi({ chainId });
+
 
 async function get_latest_group_members(since: number): Promise<GroupMember[]> {
     // We fetch the latest group members from the database
@@ -105,14 +133,73 @@ async function mintFromGroup(balances: number) {
     // We then mint the individual tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
 }
 
-async function pickNextMember(membersCache: MembersCache): Promise<{ member: GroupMember; direction: "toGroup" | "fromGroup" }> {
+async function pickNextMember(membersCache: MembersCache): Promise<{ member: GroupMember; direction: ArbDirection }> {
     // Logic to pick next members using exploration/exploitation trade-off
-    return { member: membersCache.members[0], direction: "toGroup" };
+    return { member: membersCache.members[0], direction: ArbDirection.TO_GROUP };
 }
 
-async function placeLimitOrder(sellAmount: number, buyAmount: number): Promise<string> {
-    // Simulate placing a limit order on CowSwap
-    return `order_${Date.now()}`;
+// Approve relayer to spend tokens
+async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
+    // This function approves the token over maximal amounts for now, since we consider the vaultRelayer to be trustworthy (in light of protection mechanisms on their part)
+
+    const tokenContract = new Contract(tokenAddress, vaultRelayerApproveAbi, wallet);
+    const tx = await tokenContract.approve(CowSwapRelayerAddress,ethers.constants.MaxUint256);
+    console.log('Approval transaction:', tx);
+    await tx.wait();
+    console.log('Approval transaction confirmed');
+  }
+
+async function placeOrder(maxSellAmount: number, member: GroupMember, direction: ArbDirection, limit: number): Promise<string> {
+    // This wrapper places a partially fillable limit order that sells up to [maxSellAmount] of the inToken at a price of [limit] each. 
+    // If [direction] is ArbDirection.TO_GROUP, the bot sells member tokens for group tokens. If [direction] is ArbDirection.FROM_GROUP, the bot sells group tokens for member tokens.
+    // The function also takes care of the approval with the cowswap vaultrelayer and signing of the order.
+
+    // Approve token for trading if required
+    if (direction === ArbDirection.TO_GROUP && !member.is_approved) {
+        // We approve the token for trading
+        await approveTokenWithRelayer(member.token_address);
+        member.is_approved = true;
+    }
+
+    const sellToken = direction === ArbDirection.TO_GROUP ? member.token_address : groupTokenAddress;
+    const buyToken = direction === ArbDirection.TO_GROUP ? groupTokenAddress : member.token_address;
+
+    const maxBuyAmount = maxSellAmount * limit;
+
+    // Define the order
+    const order: UnsignedOrder = {
+        sellToken: sellToken,
+        buyToken: buyToken,
+        sellAmount: maxSellAmount.toString(),
+        buyAmount: maxBuyAmount.toString(),
+        validTo: validityCutoff, // Order valid for 1 hour
+        appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Taken via instructions from API Schema
+        feeAmount: "0", // Adjust if necessary
+        partiallyFillable: true,
+        kind: OrderKind.SELL, // "sell" means you're selling tokenIn for tokenOut
+        receiver: botAddress, // Tokens will be sent back to the same address
+    };
+
+    console.log("Signing the order...");
+    const { signature, signingScheme } = await OrderSigningUtils.signOrder(order, chainId, wallet);
+
+    console.log("Submitting the order to CoW Protocol...");
+    try {
+        const orderId = await orderBookApi.sendOrder({
+            ...order,
+            signature,
+            from: botAddress,
+            appData: "{}",
+            signingScheme: signingScheme as unknown as SigningScheme
+        });
+        console.log(`Order successfully submitted! Order ID: ${orderId}`);
+        return orderId;
+
+    } catch (error) {
+        console.error("Failed to submit the order:", error);
+        //  @TODO: Handle error properly
+        return "error";
+    }
 }
 
 async function main() {
@@ -148,17 +235,12 @@ async function main() {
             const redeemAmount = await redeemGroupTokens(target_redeemAmount, member);
 
             if (redeemAmount > 0) {
-                // Approve token for trading if required
-                if (!member.is_approved) {
-                    // We approve the token for trading
-                    member.is_approved = true;
-                    await approve_member([member]);
-                }
-                const orderId = await placeLimitOrder(redeemAmount, redeemAmount * (1 - epsilon));
+
+                const orderId = await placeOrder(redeemAmount, redeemAmount * (1 - epsilon));
             }
         } else if (direction === "fromGroup") {
             // we simply place a limit order to buy the 
-            const orderId = await placeLimitOrder(investingAmount, investingAmount * (1 - epsilon));
+            const orderId = await placeOrder(investingAmount, investingAmount * (1 - epsilon));
         }
     }
 }
