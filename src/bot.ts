@@ -15,7 +15,6 @@ interface GroupMember {
     token_address: string;
     latest_price: number;
     is_approved: boolean;
-    approved_amount: 
 }
 
 interface MembersCache {
