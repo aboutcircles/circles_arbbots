@@ -72,6 +72,15 @@ const vaultRelayerApproveAbi = [
         type: 'function',
     },
 ];
+const erc20Abi = [
+    {
+        constant: true,
+        inputs: [{ name: "_owner", type: "address" }],
+        name: "balanceOf",
+        outputs: [{ name: "balance", type: "uint256" }],
+        type: "function",
+    },
+];
 
 // Initialize relevant objects
 const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
@@ -110,19 +119,22 @@ async function redeemGroupTokens(max_amount: number, target_member: GroupMember)
     return 0;
 }
 
-// helper function to get current balance of an account
-async function getBalances(address: string): Promise<number> {
-    // We fetch the balance using the ethers library
-    let balance = await ethers.provider.getBalance(address);
-    return balance;
+async function getBotBalance(tokenAddress: string): Promise<number> {
+    
+    // Create a contract instance for the token
+    const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
+
+    // Fetch the balance
+    let balance = await tokenContract.balanceOf(botAddress);
+    return parseFloat(ethers.utils.formatEther(balance));
 }
 
-// check order status as RPC call
-async function getOpenOrders(from: string): Promise<Order[]> {
+async function getOpenOrders(): Promise<Order[]> {
     // We fetch open orders using the CowSwap Orderbook API
-    let orders: Order[] = await OrderBookApi.getOrders(from=from);
+    let orders: Order[] = await orderBookApi.getOrders({ owner: botAddress });
     return orders.filter((order) => order.orderStatus === OrderStatus.OPEN);
 }
+
 async function mintIndividualTokens() {
     // We first get all the balances that the bot has
     let balances = await getBalances(botAddress);
@@ -210,7 +222,7 @@ async function main() {
         await new Promise((resolve) => setTimeout(resolve, waitingTime));
 
         // 1. Update open orders
-        const openOrders = await getOpenOrders(bot.address)
+        const openOrders = await getOpenOrders()
 
         if (openOrders.length >= maxOpenOrders) {
             continue;
@@ -224,24 +236,28 @@ async function main() {
         const { member, direction } = await pickNextMember(membersCache);
 
         // 4. Calculate investing amount
-        let currentBalance = await getBalances(bot.address)[groupTokenAddress];
-        const investingFraction = maxInvestingFraction / Math.max(1, openOrders.length);
-        let investingAmount = currentBalance * investingFraction * bufferFraction;
+        let currentBotBalance = await getBotBalance(member.token_address);
 
-        if (direction === "toGroup") {
+        const investingFraction = maxInvestingFraction / Math.max(1, openOrders.length);
+
+        var investingAmount = currentBotBalance * investingFraction * bufferFraction;
+
+        // 5. Redeem group tokens if necessary
+        if (direction === ArbDirection.TO_GROUP) {
             const collateralAmount = (group.collateral.get(member) || 0) * bufferFraction;
             const target_redeemAmount = Math.min(collateralAmount, investingAmount);
 
             const redeemAmount = await redeemGroupTokens(target_redeemAmount, member);
 
-            if (redeemAmount > 0) {
-
-                const orderId = await placeOrder(redeemAmount, redeemAmount * (1 - epsilon));
-            }
-        } else if (direction === "fromGroup") {
-            // we simply place a limit order to buy the 
-            const orderId = await placeOrder(investingAmount, investingAmount * (1 - epsilon));
-        }
+            var investingAmount = redeemAmount;
+        } 
+        
+        // 6. Place order
+        await placeOrder(
+            investingAmount, 
+            member,
+            direction,
+            1-epsilon);        
     }
 }
 
