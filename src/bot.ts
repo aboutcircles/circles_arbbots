@@ -1,6 +1,6 @@
 // TypeScript code for the Circles arbitrage bot
 import { ethers, Contract } from "ethers";
-import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme } from "@cowprotocol/cow-sdk";
+import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme, EnrichedOrder , OrderStatus} from "@cowprotocol/cow-sdk";
 import "dotenv/config";
 
 
@@ -27,18 +27,6 @@ enum ArbDirection {
     TO_GROUP = "TO_GROUP",
     FROM_GROUP = "FROM_GROUP",
 }
-
-enum OrderStatus {
-    OPEN = "OPEN",
-    FILLED = "FILLED",
-    CANCELLED = "CANCELLED",
-}
-
-interface Order {
-    id: string;
-    orderStatus: OrderStatus;
-}
-
 
 // Algorithm parameters
 const epsilon: number = 0.01;
@@ -129,10 +117,10 @@ async function getBotBalance(tokenAddress: string): Promise<number> {
     return parseFloat(ethers.utils.formatEther(balance));
 }
 
-async function getOpenOrders(): Promise<Order[]> {
+async function getOpenOrders(): Promise<EnrichedOrder[]> {
     // We fetch open orders using the CowSwap Orderbook API
-    let orders: Order[] = await orderBookApi.getOrders({ owner: botAddress });
-    return orders.filter((order) => order.orderStatus === OrderStatus.OPEN);
+    let orders: EnrichedOrder[] = await orderBookApi.getOrders({ owner: botAddress });
+    return orders.filter((order) => order.status === OrderStatus.OPEN);
 }
 
 async function mintIndividualTokens() {
