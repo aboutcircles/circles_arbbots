@@ -46,6 +46,8 @@ const chainId = SupportedChainId.GNOSIS_CHAIN
 const rpcUrl = process.env.RPC_URL!;
 const botAddress = process.env.ARBBOT_ADDRESS!;
 const botPrivateKey = process.env.PRIVATE_KEY!;
+const allowanceAmount = ethers.constants.MaxUint256;
+const DemurragedVSInflation = 0;
 
 const postgresqlPW = process.env.POSTGRESQL_PW;
 const postgresqlUser = "readonly_user";
@@ -53,14 +55,13 @@ const postgresqlDB = "circles";
 const postgressqlHost = "144.76.163.174";
 const postgressqlPort = 5432;
 
-
 const groupAddress = process.env.TEST_GROUP_ADDRESS!;
 const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
 const CowSwapRelayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
 const tokenWrapperContractAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 
 // ABIs
-const vaultRelayerApproveAbi = [
+const tokenApproveAbi = [
     {
         inputs: [
             { name: '_spender', type: 'address' },
@@ -78,6 +79,16 @@ const erc20Abi = [
         inputs: [{ name: "_owner", type: "address" }],
         name: "balanceOf",
         outputs: [{ name: "balance", type: "uint256" }],
+        type: "function",
+    },
+    {
+        constant: true,
+        inputs: [
+            { name: "_owner", type: "address" },
+            { name: "_spender", type: "address" }
+        ],
+        name: "allowance",
+        outputs: [{ name: "remaining", type: "uint256" }],
         type: "function",
     },
 ];
@@ -125,12 +136,33 @@ async function updateGroupMemberTokenAddresses(members: GroupMember[]): Promise<
     // we call the contract 1 by 1 for each address
     for (let i = 0; i < members.length; i++) {
         const member = members[i];
-        const tokenAddress = await tokenWrapperContract.erc20Circles(0, member.address);
+        const tokenAddress = await tokenWrapperContract.erc20Circles(DemurragedVSInflation, member.address);
         member.token_address = tokenAddress;
     }
     return members;
 }
 
+
+async function checkAllowance(owner: string, spender: string, tokenAddress: string): Promise<ethers.BigNumber> {
+    // Create a contract instance for the token
+    const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
+
+    // Fetch the allowance
+    const allowance = await tokenContract.allowance(owner, spender);
+    return allowance
+}
+
+async function updateAllowances(members: GroupMember[]): Promise<GroupMember[]> {
+    // we call the contract 1 by 1 for each address
+    for (let i = 0; i < members.length; i++) {
+        const member = members[i];
+        const allowance = await checkAllowance(botAddress, CowSwapRelayerAddress, member.token_address);
+        
+        // We set the is_approved flag based on the allowance
+        member.is_approved = allowance.eq(allowanceAmount);
+    }
+    return members;
+}
 
 async function initializeMembersCache(): Promise<MembersCache> {
     // We fetch the latest members from the database
@@ -138,6 +170,13 @@ async function initializeMembersCache(): Promise<MembersCache> {
     var members = await getLatestGroupMembers(BigInt(earlyNumber));
     // We fetch the token addresses for the members
     members = await updateGroupMemberTokenAddresses(members);
+
+    // We filter members without wrapped tokens
+    members = members.filter((member) => member.token_address !== ethers.constants.AddressZero);
+
+    // We fetch the allowances for the members
+    members = await updateAllowances(members);
+
     console.log(members);
     return {
         lastUpdated: Date.now(),
@@ -197,8 +236,8 @@ async function pickNextMember(membersCache: MembersCache): Promise<{ member: Gro
 async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     // This function approves the token over maximal amounts for now, since we consider the vaultRelayer to be trustworthy (in light of protection mechanisms on their part)
 
-    const tokenContract = new Contract(tokenAddress, vaultRelayerApproveAbi, wallet);
-    const tx = await tokenContract.approve(CowSwapRelayerAddress,ethers.constants.MaxUint256);
+    const tokenContract = new Contract(tokenAddress, tokenApproveAbi, wallet);
+    const tx = await tokenContract.approve(CowSwapRelayerAddress,allowanceAmount);
     console.log('Approval transaction:', tx);
     await tx.wait();
     console.log('Approval transaction confirmed');
