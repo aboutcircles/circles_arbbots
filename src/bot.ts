@@ -28,7 +28,7 @@ interface Bot {
 interface GroupMember {
     address: string;
     token_address: string;
-    latest_price: number | null;
+    latest_price: number | null; // the price of the member token in units of the group token in human readonable format
     last_price_update: number;
 }
 
@@ -53,6 +53,7 @@ const waitingTime: number = 1000; // 1 second
 const maxInvestingFraction: number = 0.1;
 const bufferFraction: number = 0.95;
 const maxOpenOrders: number = 10;
+const ratioCutoff: number = 0.1 // this value determines at which point we consider prices to have equilibrated.
 
 // constants 
 const cowswapChainId = SupportedChainId.GNOSIS_CHAIN
@@ -220,7 +221,9 @@ async function fetchLatestPrice(tokenAddress: string): Promise<number | null> {
         swapKind,
     });
 
-    return Number(swap.outputAmount.amount)
+    // the price of the member token (in units of group tokken) is the inverse of the number of tokens I get out for one grouptoken
+    return Number(TokenAmount.fromHumanAmount(balancerGroupToken, "1.0").divDownFixed(swap.outputAmount.amount))
+
 }
 
 
@@ -310,7 +313,22 @@ async function mintFromGroup(balances: number) {
 
 async function pickNextMember(membersCache: MembersCache): Promise<{ member: GroupMember; direction: ArbDirection }> {
     // Logic to pick next members using exploration/exploitation trade-off
-    return { member: membersCache.members[0], direction: ArbDirection.TO_GROUP };
+
+    // For now we use a dummy logic: For all those members with a proper latest_price that is far enough from 1., we pick one at random
+
+    // filter all the prices that are more than cutOff away from 1.
+    let members = membersCache.members.filter((member) => Math.abs(member.latest_price! - 1) > ratioCutoff);
+
+    // if we have no members left, we return an empty dict
+    if (members.length === 0) {
+        //TODO: Incorrect right now!
+        return { member: members[0], direction: ArbDirection.TO_GROUP };
+    }
+
+    let pickedMember = members[Math.floor(Math.random() * members.length)];
+    let direction = pickedMember.latest_price! > 1 ? ArbDirection.TO_GROUP : ArbDirection.FROM_GROUP;
+
+    return { member: pickedMember, direction: direction };
 }
 
 // Approve relayer to spend tokens
