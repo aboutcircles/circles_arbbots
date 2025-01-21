@@ -30,7 +30,6 @@ interface GroupMember {
     token_address: string;
     latest_price: number | null;
     last_price_update: number;
-    is_approved: boolean;
 }
 
 interface MembersCache {
@@ -62,7 +61,7 @@ const rpcUrl = process.env.RPC_URL!;
 const botAddress = process.env.ARBBOT_ADDRESS!;
 const botPrivateKey = process.env.PRIVATE_KEY!;
 const allowanceAmount = ethers.constants.MaxUint256;
-const DemurragedVSInflation = 0;
+const DemurragedVSInflation = 1;
 
 const postgresqlPW = process.env.POSTGRESQL_PW;
 const postgresqlUser = "readonly_user";
@@ -182,9 +181,9 @@ async function updateAllowances(members: GroupMember[]): Promise<GroupMember[]> 
     for (let i = 0; i < members.length; i++) {
         const member = members[i];
         const allowance = await checkAllowance(botAddress, CowSwapRelayerAddress, member.token_address);
-        
+        console.log(`Allowance for ${member.address}: ${allowance}`);
         // We set the is_approved flag based on the allowance
-        member.is_approved = allowance.eq(allowanceAmount);
+        // member.is_approved = allowance.eq(allowanceAmount);
     }
     return members;
 }
@@ -237,19 +236,26 @@ async function checkLatestPrices(members: GroupMember[]): Promise<GroupMember[]>
 
 // TODO: At some point this needs to be updated to some subset of new members, etc. 
 async function initializeMembersCache(): Promise<MembersCache> {
+    console.log("Initializing members cache...");
+
     // We fetch the latest members from the database
+    console.log("Fetching latest members...");
     const earlyNumber: number = 0;
     var members = await getLatestGroupMembers(BigInt(earlyNumber));
+
     // We fetch the token addresses for the members
+    console.log("Fetching token addresses...");
     members = await updateGroupMemberTokenAddresses(members);
 
     // We filter members without wrapped tokens
     members = members.filter((member) => member.token_address !== ethers.constants.AddressZero);
 
     // We fetch the allowances for the members
-    members = await updateAllowances(members);
+    // console.log("Fetching allowances...");
+    // members = await updateAllowances(members);
 
     // We fetch the latest price for the members
+    console.log("Fetching latest prices...");
     members = await checkLatestPrices(members);
 
     console.log(members);
@@ -323,11 +329,11 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
     // If [direction] is ArbDirection.TO_GROUP, the bot sells member tokens for group tokens. If [direction] is ArbDirection.FROM_GROUP, the bot sells group tokens for member tokens.
     // The function also takes care of the approval with the cowswap vaultrelayer and signing of the order.
 
-    // Approve token for trading if required
-    if (direction === ArbDirection.TO_GROUP && !member.is_approved) {
-        // We approve the token for trading
+    // Approve the relayer to spend the token fi required
+    const current_allowance = await checkAllowance(botAddress, CowSwapRelayerAddress, member.token_address);
+    if (Number(current_allowance) < maxSellAmount) {
+        console.log("Approving the relayer to spend the token...");
         await approveTokenWithRelayer(member.token_address);
-        member.is_approved = true;
     }
 
     const sellToken = direction === ArbDirection.TO_GROUP ? member.token_address : groupTokenAddress;
