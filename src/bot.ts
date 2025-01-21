@@ -1,6 +1,19 @@
 // TypeScript code for the Circles arbitrage bot
 import { ethers, Contract } from "ethers";
 import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme, EnrichedOrder , OrderStatus} from "@cowprotocol/cow-sdk";
+import {
+    BalancerApi,
+    ChainId,
+    Slippage,
+    SwapKind,
+    Token,
+    TokenAmount,
+    Swap,
+    SwapBuildOutputExactIn,
+    SwapBuildCallInput,
+    ExactInQueryOutput
+  } from "@balancer/sdk";
+  
 import { Client } from "pg";
 
 import "dotenv/config";
@@ -15,7 +28,8 @@ interface Bot {
 interface GroupMember {
     address: string;
     token_address: string;
-    latest_price: number;
+    latest_price: number | null;
+    last_price_update: number;
     is_approved: boolean;
 }
 
@@ -42,7 +56,8 @@ const bufferFraction: number = 0.95;
 const maxOpenOrders: number = 10;
 
 // constants 
-const chainId = SupportedChainId.GNOSIS_CHAIN
+const cowswapChainId = SupportedChainId.GNOSIS_CHAIN
+const chainId = ChainId.GNOSIS_CHAIN;
 const rpcUrl = process.env.RPC_URL!;
 const botAddress = process.env.ARBBOT_ADDRESS!;
 const botPrivateKey = process.env.PRIVATE_KEY!;
@@ -98,7 +113,11 @@ const tokenWrapperAbi = [{"inputs":[{"internalType":"contract IHubV2","name":"_h
 // Initialize relevant objects
 const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
 const wallet = new ethers.Wallet(botPrivateKey, provider);
-const orderBookApi = new OrderBookApi({ chainId });
+const orderBookApi = new OrderBookApi({ chainId: cowswapChainId });
+const balancerApi = new BalancerApi(
+    "https://api-v3.balancer.fi/",
+    chainId
+);
 const client = new Client({
     host: postgressqlHost,
     port: postgressqlPort,
@@ -106,6 +125,12 @@ const client = new Client({
     user: postgresqlUser,
     password: postgresqlPW,
 });
+const balancerGroupToken = new Token(
+    chainId,
+    groupTokenAddress as `0x${string}`,
+    18,
+    "Group Token"
+);
 
 // Connect the postgresql client
 async function connectClient() {
@@ -128,7 +153,7 @@ async function getLatestGroupMembers(since: bigint): Promise<GroupMember[]> {
     } catch (err) {
         console.error('Error running query', err);
         return [];
-    }
+   }
 }
 
 async function updateGroupMemberTokenAddresses(members: GroupMember[]): Promise<GroupMember[]> {
@@ -164,6 +189,53 @@ async function updateAllowances(members: GroupMember[]): Promise<GroupMember[]> 
     return members;
 }
 
+// Fetch the latest price for an individual token (in units of the group token)
+async function fetchLatestPrice(tokenAddress: string): Promise<number | null> {
+
+    const memberToken = new Token(
+        chainId,
+        tokenAddress as `0x${string}`,
+        18,
+        "Member Token"
+    );
+
+    const swapKind = SwapKind.GivenIn;
+
+    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths({
+        chainId,
+        tokenIn: balancerGroupToken.address,
+        tokenOut: memberToken.address,
+        swapKind: swapKind,
+        swapAmount: TokenAmount.fromHumanAmount(balancerGroupToken, "1.0")
+    });
+
+    // if there is no path, we return null
+    if (sorPaths.length === 0) {
+        return null;
+    }
+
+    // Swap object provides useful helpers for re-querying, building call, etc
+    const swap = new Swap({
+        chainId,
+        paths: sorPaths,
+        swapKind,
+    });
+
+    return Number(swap.outputAmount.amount)
+}
+
+
+async function checkLatestPrices(members: GroupMember[]): Promise<GroupMember[]> {
+    // we call the contract 1 by 1 for each address
+    for (let i = 0; i < members.length; i++) {
+        const member = members[i];
+        member.latest_price = await fetchLatestPrice(member.token_address);
+        member.last_price_update = Date.now();
+    }
+    return members;
+}
+
+// TODO: At some point this needs to be updated to some subset of new members, etc. 
 async function initializeMembersCache(): Promise<MembersCache> {
     // We fetch the latest members from the database
     const earlyNumber: number = 0;
@@ -176,6 +248,9 @@ async function initializeMembersCache(): Promise<MembersCache> {
 
     // We fetch the allowances for the members
     members = await updateAllowances(members);
+
+    // We fetch the latest price for the members
+    members = await checkLatestPrices(members);
 
     console.log(members);
     return {
@@ -275,7 +350,7 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
     };
 
     console.log("Signing the order...");
-    const { signature, signingScheme } = await OrderSigningUtils.signOrder(order, chainId, wallet);
+    const { signature, signingScheme } = await OrderSigningUtils.signOrder(order, cowswapChainId, wallet);
 
     console.log("Submitting the order to CoW Protocol...");
     try {
