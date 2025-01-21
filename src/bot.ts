@@ -4,19 +4,16 @@ import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, Order
 import {
     BalancerApi,
     ChainId,
-    Slippage,
     SwapKind,
     Token,
     TokenAmount,
     Swap,
-    SwapBuildOutputExactIn,
-    SwapBuildCallInput,
-    ExactInQueryOutput
   } from "@balancer/sdk";
   
 import { Client } from "pg";
 
 import "dotenv/config";
+import { log } from "console";
 
 
 interface Bot {
@@ -28,7 +25,7 @@ interface Bot {
 interface GroupMember {
     address: string;
     token_address: string;
-    latest_price: number | null; // the price of the member token in units of the group token in human readonable format
+    latest_price: bigint | null; // the value of the member token represented as the bigint representation of the amount of group tokens you get for 1 member token
     last_price_update: number;
 }
 
@@ -38,13 +35,17 @@ interface MembersCache {
 }
 
 enum ArbDirection {
-    TO_GROUP = "TO_GROUP",
-    FROM_GROUP = "FROM_GROUP",
+    REDEEM = "TO_GROUP",
+    GROUP_MINT = "FROM_GROUP",
 }
 
 type PlaceOrderResult = 
     | { success: true; orderId: string }
     | { success: false; error: string };
+
+type NextPick = 
+    | { member: GroupMember, direction: ArbDirection }
+    | null;
 
 // Algorithm parameters
 const epsilon: number = 0.01;
@@ -177,20 +178,8 @@ async function checkAllowance(owner: string, spender: string, tokenAddress: stri
     return allowance
 }
 
-async function updateAllowances(members: GroupMember[]): Promise<GroupMember[]> {
-    // we call the contract 1 by 1 for each address
-    for (let i = 0; i < members.length; i++) {
-        const member = members[i];
-        const allowance = await checkAllowance(botAddress, CowSwapRelayerAddress, member.token_address);
-        console.log(`Allowance for ${member.address}: ${allowance}`);
-        // We set the is_approved flag based on the allowance
-        // member.is_approved = allowance.eq(allowanceAmount);
-    }
-    return members;
-}
-
 // Fetch the latest price for an individual token (in units of the group token)
-async function fetchLatestPrice(tokenAddress: string): Promise<number | null> {
+async function fetchLatestPrice(tokenAddress: string): Promise<bigint | null> {
 
     const memberToken = new Token(
         chainId,
@@ -203,10 +192,10 @@ async function fetchLatestPrice(tokenAddress: string): Promise<number | null> {
 
     const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths({
         chainId,
-        tokenIn: balancerGroupToken.address,
-        tokenOut: memberToken.address,
+        tokenIn: memberToken.address,
+        tokenOut: balancerGroupToken.address,
         swapKind: swapKind,
-        swapAmount: TokenAmount.fromHumanAmount(balancerGroupToken, "1.0")
+        swapAmount: TokenAmount.fromHumanAmount(memberToken, "1.0")
     });
 
     // if there is no path, we return null
@@ -222,7 +211,7 @@ async function fetchLatestPrice(tokenAddress: string): Promise<number | null> {
     });
 
     // the price of the member token (in units of group tokken) is the inverse of the number of tokens I get out for one grouptoken
-    return Number(TokenAmount.fromHumanAmount(balancerGroupToken, "1.0").divDownFixed(swap.outputAmount.amount))
+    return swap.outputAmount.amount
 
 }
 
@@ -252,10 +241,6 @@ async function initializeMembersCache(): Promise<MembersCache> {
 
     // We filter members without wrapped tokens
     members = members.filter((member) => member.token_address !== ethers.constants.AddressZero);
-
-    // We fetch the allowances for the members
-    // console.log("Fetching allowances...");
-    // members = await updateAllowances(members);
 
     // We fetch the latest price for the members
     console.log("Fetching latest prices...");
@@ -311,24 +296,37 @@ async function mintFromGroup(balances: number) {
     // We then mint the individual tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
 }
 
-async function pickNextMember(membersCache: MembersCache): Promise<{ member: GroupMember; direction: ArbDirection }> {
+
+async function pickNextMember(membersCache: MembersCache): Promise<NextPick> {
     // Logic to pick next members using exploration/exploitation trade-off
 
-    // For now we use a dummy logic: For all those members with a proper latest_price that is far enough from 1., we pick one at random
-
-    // filter all the prices that are more than cutOff away from 1.
-    let members = membersCache.members.filter((member) => Math.abs(member.latest_price! - 1) > ratioCutoff);
-
-    // if we have no members left, we return an empty dict
+    // In a first step we filter out members without a price
+    let members = membersCache.members.filter((member) => member.latest_price !== null);
     if (members.length === 0) {
-        //TODO: Incorrect right now!
-        return { member: members[0], direction: ArbDirection.TO_GROUP };
+        console.log("No members with a price found");
+        return null;
+    }    
+
+    // For now we use a dummy logic: we pick the member whose token's price is the farthest away from 1. If that is within the cutoff, we do nothing.
+    
+    // some helpfer functions to let us calculate the ratio of a bigint
+    function log10(bigint:bigint) {
+        if (bigint < 0) return NaN;
+        const s = bigint.toString(10);
+        return s.length + Math.log10(parseFloat("0." + s.substring(0, 15)))
+      }
+
+    let logdiff = (a: bigint) => Number(Math.abs(log10(a) - 18));
+    
+    // we sort the members by the highest abs diff function evaluated on the latest value
+    let sortedMembers = members.sort((a, b) => logdiff(b.latest_price!) - logdiff(a.latest_price!));
+    // we take the first and last member as candidates
+    let pickedMember = sortedMembers[0];
+    if (logdiff(pickedMember.latest_price!) < ratioCutoff) {
+        return null;
     }
-
-    let pickedMember = members[Math.floor(Math.random() * members.length)];
-    let direction = pickedMember.latest_price! > 1 ? ArbDirection.TO_GROUP : ArbDirection.FROM_GROUP;
-
-    return { member: pickedMember, direction: direction };
+    let direction = log10(pickedMember.latest_price!) > 18 ? ArbDirection.REDEEM : ArbDirection.GROUP_MINT;
+    return { member: pickedMember, direction: direction};
 }
 
 // Approve relayer to spend tokens
@@ -354,8 +352,8 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
         await approveTokenWithRelayer(member.token_address);
     }
 
-    const sellToken = direction === ArbDirection.TO_GROUP ? member.token_address : groupTokenAddress;
-    const buyToken = direction === ArbDirection.TO_GROUP ? groupTokenAddress : member.token_address;
+    const sellToken = direction === ArbDirection.REDEEM ? member.token_address : groupTokenAddress;
+    const buyToken = direction === ArbDirection.REDEEM ? groupTokenAddress : member.token_address;
 
     const maxBuyAmount = maxSellAmount * limit;
 
@@ -405,7 +403,9 @@ async function main() {
     const membersCache = await initializeMembersCache();
     const bot = await initializeBot();
 
-    let run_while_loop = false;
+
+
+    let run_while_loop = true;
     while (run_while_loop) {
         await new Promise((resolve) => setTimeout(resolve, waitingTime));
 
@@ -422,8 +422,14 @@ async function main() {
 
         // 3. Pick next members
 
-        const { member, direction } = await pickNextMember(membersCache);
+        const nextPick = await pickNextMember(membersCache);
 
+        if (nextPick === null) {
+            continue;
+        }
+
+        const { member, direction } = nextPick;
+        console.log(`Picked member ${member.address} for ${direction} arbitrage`);
         // 4. Calculate investing amount
         let currentBotBalance = await getBotBalance(member.token_address);
 
@@ -432,7 +438,7 @@ async function main() {
         var investingAmount = currentBotBalance * investingFraction * bufferFraction;
 
         // 5. Redeem group tokens if necessary
-        if (direction === ArbDirection.TO_GROUP) {
+        if (direction === ArbDirection.REDEEM) {
             const collateralAmount = 0//(group.collateral.get(member) || 0) * bufferFraction;
             const target_redeemAmount = Math.min(collateralAmount, investingAmount);
             const redeemAmount = await redeemGroupTokens(target_redeemAmount, member);
@@ -447,7 +453,7 @@ async function main() {
             1-epsilon);        
     }
 }
-
+}
 
 
 main().catch(console.error);
