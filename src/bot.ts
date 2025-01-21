@@ -35,8 +35,8 @@ interface MembersCache {
 }
 
 enum ArbDirection {
-    REDEEM = "TO_GROUP",
-    GROUP_MINT = "FROM_GROUP",
+    REDEEM = "REDEEM",
+    GROUP_MINT = "GROUP_MINT",
 }
 
 type PlaceOrderResult = 
