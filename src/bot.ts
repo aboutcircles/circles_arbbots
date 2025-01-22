@@ -1,5 +1,16 @@
 // TypeScript code for the Circles arbitrage bot
+
+import "dotenv/config";
+import { log } from "console";
+import WebSocket from "ws";
+global.WebSocket = WebSocket as unknown as typeof globalThis.WebSocket;
+
+// Import ethers v5
 import { ethers, Contract } from "ethers";
+// Import ethers v6 (aliased in package.json)
+// @dev two ethers versions are required as v5 is used by CoWswap sdk and v6 by the Circles sdk
+import { ethers as ethers6 } from "ethers6";
+
 import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme, EnrichedOrder , OrderStatus} from "@cowprotocol/cow-sdk";
 import {
     BalancerApi,
@@ -9,43 +20,29 @@ import {
     TokenAmount,
     Swap,
   } from "@balancer/sdk";
-  
-import { Client } from "pg";
+import { Avatar, circlesConfig, Sdk } from "@circles-sdk/sdk";
+import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
+import { CirclesData, CirclesRpc, TokenBalanceRow } from '@circles-sdk/data';
 
-import "dotenv/config";
-import { log } from "console";
+import pg from "pg"; // @dev pg is a CommonJS module
+const { Client } = pg;
 
+import {
+    ArbDirection,
+    Bot,
+    GroupMember,
+    MembersCache,
+    PlaceOrderResult,
+    NextPick
+} from "./interfaces/index.js";
 
-interface Bot {
-    balance: number;
-    address: string;
-    groupTokens: number;
-}
-
-interface GroupMember {
-    address: string;
-    token_address: string;
-    latest_price: bigint | null; // the value of the member token represented as the bigint representation of the amount of group tokens you get for 1 member token
-    last_price_update: number;
-}
-
-interface MembersCache {
-    lastUpdated: number;
-    members: GroupMember[];
-}
-
-enum ArbDirection {
-    REDEEM = "REDEEM",
-    GROUP_MINT = "GROUP_MINT",
-}
-
-type PlaceOrderResult = 
-    | { success: true; orderId: string }
-    | { success: false; error: string };
-
-type NextPick = 
-    | { member: GroupMember, direction: ArbDirection }
-    | null;
+// ABI
+import {
+    tokenApproveAbi,
+    erc20Abi,
+    erc1155Abi,
+    tokenWrapperAbi
+} from "./abi/index.js";
 
 // Algorithm parameters
 const epsilon: number = 0.01;
@@ -76,44 +73,20 @@ const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
 const CowSwapRelayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
 const tokenWrapperContractAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 
-// ABIs
-const tokenApproveAbi = [
-    {
-        inputs: [
-            { name: '_spender', type: 'address' },
-            { name: '_value', type: 'uint256' },
-        ],
-        name: 'approve',
-        outputs: [{ type: 'bool' }],
-        stateMutability: 'nonpayable',
-        type: 'function',
-    },
-];
-const erc20Abi = [
-    {
-        constant: true,
-        inputs: [{ name: "_owner", type: "address" }],
-        name: "balanceOf",
-        outputs: [{ name: "balance", type: "uint256" }],
-        type: "function",
-    },
-    {
-        constant: true,
-        inputs: [
-            { name: "_owner", type: "address" },
-            { name: "_spender", type: "address" }
-        ],
-        name: "allowance",
-        outputs: [{ name: "remaining", type: "uint256" }],
-        type: "function",
-    },
-];
-
-const tokenWrapperAbi = [{"inputs":[{"internalType":"contract IHubV2","name":"_hub","type":"address"},{"internalType":"contract INameRegistry","name":"_nameRegistry","type":"address"},{"internalType":"address","name":"_masterCopyERC20Demurrage","type":"address"},{"internalType":"address","name":"_masterCopyERC20Inflation","type":"address"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesAmountOverflow","type":"error"},{"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"uint256","name":"","type":"uint256"},{"internalType":"uint8","name":"","type":"uint8"}],"name":"CirclesErrorAddressUintArgs","type":"error"},{"inputs":[{"internalType":"uint8","name":"","type":"uint8"}],"name":"CirclesErrorNoArgs","type":"error"},{"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"uint8","name":"","type":"uint8"}],"name":"CirclesErrorOneAddressArg","type":"error"},{"inputs":[{"internalType":"uint256","name":"providedId","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesIdMustBeDerivedFromAddress","type":"error"},{"inputs":[{"internalType":"uint256","name":"id","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesInvalidCirclesId","type":"error"},{"inputs":[{"internalType":"uint256","name":"parameter","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesInvalidParameter","type":"error"},{"inputs":[],"name":"CirclesProxyAlreadyInitialized","type":"error"},{"inputs":[{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesReentrancyGuard","type":"error"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"avatar","type":"address"},{"indexed":true,"internalType":"address","name":"erc20Wrapper","type":"address"},{"indexed":false,"internalType":"enum CirclesType","name":"circlesType","type":"uint8"}],"name":"ERC20WrapperDeployed","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"contract Proxy","name":"proxy","type":"address"},{"indexed":false,"internalType":"address","name":"masterCopy","type":"address"}],"name":"ProxyCreation","type":"event"},{"inputs":[],"name":"ERC20_WRAPPER_SETUP_CALLPREFIX","outputs":[{"internalType":"bytes4","name":"","type":"bytes4"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"_avatar","type":"address"},{"internalType":"enum CirclesType","name":"_circlesType","type":"uint8"}],"name":"ensureERC20","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"enum CirclesType","name":"","type":"uint8"},{"internalType":"address","name":"","type":"address"}],"name":"erc20Circles","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"hub","outputs":[{"internalType":"contract IHubV2","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"masterCopyERC20Wrapper","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"nameRegistry","outputs":[{"internalType":"contract INameRegistry","name":"","type":"address"}],"stateMutability":"view","type":"function"}];
-
 // Initialize relevant objects
 const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+const providerV6 = new ethers6.JsonRpcProvider(rpcUrl);
+
 const wallet = new ethers.Wallet(botPrivateKey, provider);
+const walletV6 = new PrivateKeyContractRunner(providerV6, botPrivateKey);
+const selectedCirclesConfig = circlesConfig[100];
+const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
+const circlesData = new CirclesData(circlesRPC);
+
+let
+    sdk: Sdk | null,
+    botAvatar: Avatar | null;
+
 const orderBookApi = new OrderBookApi({ chainId: cowswapChainId });
 const balancerApi = new BalancerApi(
     "https://api-v3.balancer.fi/",
@@ -233,7 +206,7 @@ async function initializeMembersCache(): Promise<MembersCache> {
     // We fetch the latest members from the database
     console.log("Fetching latest members...");
     const earlyNumber: number = 0;
-    var members = await getLatestGroupMembers(BigInt(earlyNumber));
+    let members = await getLatestGroupMembers(BigInt(earlyNumber));
 
     // We fetch the token addresses for the members
     console.log("Fetching token addresses...");
@@ -270,7 +243,7 @@ async function redeemGroupTokens(max_amount: number, target_member: GroupMember)
     return 0;
 }
 
-async function getBotBalance(tokenAddress: string): Promise<number> {
+async function getBotErc20Balance(tokenAddress: string): Promise<number> {
     
     // Create a contract instance for the token
     const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
@@ -280,20 +253,69 @@ async function getBotBalance(tokenAddress: string): Promise<number> {
     return parseFloat(ethers.utils.formatEther(balance));
 }
 
+async function getBotErc1155Balance(tokenAddress: string): Promise<string> {
+    
+    // Create a contract instance for the token
+    const tokenContract = new ethers.Contract(selectedCirclesConfig.v2HubAddress, erc1155Abi, provider);
+
+    // Fetch the balance
+    const balance = await tokenContract.balanceOf(botAddress, ethers.BigNumber.from(tokenAddress));
+    return balance.toString();
+}
+
 async function getOpenOrders(): Promise<EnrichedOrder[]> {
     // We fetch open orders using the CowSwap Orderbook API
     let orders: EnrichedOrder[] = await orderBookApi.getOrders({ owner: botAddress });
     return orders.filter((order) => order.status === OrderStatus.OPEN);
 }
 
-async function mintIndividualTokens() {
-    // We first get all the balances that the bot has
-    // let balances = await getBalances(botAddress);
-    // await mintFromGroup(balances);
+async function mintPossilbeGroupTokens(group: string, membersCache: MembersCache) {
+    const botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(botAddress);
+    // Filter tokens to keep tokens of gorup members only and apply some other filters
+    const filteredTokens = botBalances.filter(token => {
+        // @todo add filter to skip dust amount
+        // Only keep version === 2 tokens and skip group tokens
+        if (token.version !== 2 || token.isGroup) return false;
+      
+        // Check if this token's owner matches (case-insensitive) any of the member addresses
+        return membersCache?.members.some(member => 
+            member.address.toLowerCase() === token.tokenOwner.toLowerCase()
+        );
+    });
+
+    // unwrap wraped personal tokens to mint as a group token later
+    const unwrapQueue = filteredTokens.map(async (token) => {
+        if(token.isWrapped) {
+            if(token.isInflationary) {
+                await botAvatar.unwrapInflationErc20(token.tokenAddress, token.staticAttoCircles);
+            } else {
+                await botAvatar.unwrapDemurrageErc20(token.tokenAddress, token.staticAttoCircles);
+            }
+        }
+    });
+    await Promise.all(unwrapQueue);
+
+    await mintGroupTokensFromIndividualTokens(filteredTokens);
 }
 
-async function mintFromGroup(balances: number) {
-    // We then mint the individual tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
+async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow[]) {
+    // We then mint the group tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
+    // @todo filter duplications after unwrap
+    const tokenAvatars = tokensToMint.map(token => token.tokenOwner);
+    const tokenBalances = tokensToMint.map(token => token.attoCircles);
+    if(tokenAvatars.length > 0 && tokenAvatars.length === tokenBalances.length) {
+        await botAvatar.groupMint(
+            groupAddress,
+            tokenAvatars,
+            tokenBalances,
+            "0x"
+        );
+    }
+
+    const totalGroupTokensBalance = await getBotErc1155Balance(groupAddress);
+    // Wrap Group Tokens into ERC20
+    // @todo filter dust amounts
+    await botAvatar.wrapInflationErc20(groupAddress, totalGroupTokensBalance);
 }
 
 
@@ -397,9 +419,13 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
     }
 
 
-// Main function
+    // Main function
 
-async function main() {
+    async function main() {
+    await walletV6.init();
+    sdk = new Sdk(walletV6, selectedCirclesConfig);
+    botAvatar = await sdk.getAvatar(botAddress);
+
     const membersCache = await initializeMembersCache();
     const bot = await initializeBot();
 
@@ -417,8 +443,8 @@ async function main() {
         }
 
         // 2. Mint group tokens from bot's balance of trusted collateral        
-        // TODO: RUn this potentially only once we know the direction of the next trade?
-        await mintIndividualTokens();
+        // TODO: Run this potentially only once we know the direction of the next trade?
+        await mintPossilbeGroupTokens(groupAddress, membersCache);
 
         // 3. Pick next members
 
@@ -431,7 +457,7 @@ async function main() {
         const { member, direction } = nextPick;
         console.log(`Picked member ${member.address} for ${direction} arbitrage`);
         // 4. Calculate investing amount
-        let currentBotBalance = await getBotBalance(member.token_address);
+        let currentBotBalance = await getBotErc20Balance(member.token_address);
 
         const investingFraction = maxInvestingFraction / Math.max(1, openOrders.length);
 
