@@ -19,6 +19,7 @@ import {
     Token,
     TokenAmount,
     Swap,
+    PriceImpact,
   } from "@balancer/sdk";
 import { Avatar, circlesConfig, Sdk } from "@circles-sdk/sdk";
 import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
@@ -45,8 +46,9 @@ import {
 } from "./abi/index.js";
 
 // Algorithm parameters
-const profitThreshold: number = 0.01; // the minimal per-trade relative profitability that the bot is willing to accept
-const validityCutoff: number = 60 * 60 * 1000; // 1 hour in ms
+const profitThreshold: bigint = 10n; // the minimal per-trade relative profitability that the bot is willing to accept, represented as bigint in steps of the profitThresholdScale
+const profitThresholdScale: bigint = 1000n; // the scale of the profit threshold
+const validityCutoff: number = 60 * 60; // 1 hour in seconds
 const waitingTime: number = 1000; // 1 second
 const bufferFraction: number = 0.95;
 const maxOpenOrders: number = 10; // added to avoid spamming cowswap with orders
@@ -141,13 +143,13 @@ async function updateGroupMemberTokenAddresses(members: GroupMember[]): Promise<
 }
 
 
-async function checkAllowance(owner: string, spender: string, tokenAddress: string): Promise<ethers.BigNumber> {
+async function checkAllowance(owner: string, spender: string, tokenAddress: string): Promise<bigint> {
     // Create a contract instance for the token
     const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the allowance
     const allowance = await tokenContract.allowance(owner, spender);
-    return allowance
+    return allowance.toBigInt();
 }
 
 // Fetch the latest price for an individual token (in units of the group token)
@@ -227,19 +229,20 @@ async function initializeMembersCache(): Promise<MembersCache> {
 
 
 // helper function to redeem as many group tokens for the target member as possible. We return the amount of group tokens redeemed
-async function redeemGroupTokens(max_amount: number, target_member: GroupMember): Promise<number> {
-    // We redeem the group tokens.
-    return 0;
+
+async function redeemGroupTokens(max_amount: bigint, target_member: GroupMember): Promise<bigint> {
+    // We redeem the group tokens. 
+    return 0n;
 }
 
-async function getBotErc20Balance(tokenAddress: string): Promise<number> {
+async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
     
     // Create a contract instance for the token
     const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the balance
     let balance = await tokenContract.balanceOf(botAddress);
-    return parseFloat(ethers.utils.formatEther(balance));
+    return balance.toBigInt();
 }
 
 async function getBotErc1155Balance(tokenAddress: string): Promise<number> {
@@ -257,7 +260,7 @@ async function getOpenOrders(): Promise<EnrichedOrder[]> {
     return orders.filter((order) => order.status === OrderStatus.OPEN);
 }
 
-async function mintPossilbeGroupTokens(group: string, membersCache: MembersCache) {
+async function mintPossibleGroupTokens(group: string, membersCache: MembersCache) {
     const botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(botAddress);
     // Filter tokens to keep tokens of gorup members only and apply some other filters
     const filteredTokens = botBalances.filter(token => {
@@ -350,14 +353,15 @@ async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     console.log('Approval transaction confirmed');
   }
 
-async function placeOrder(maxSellAmount: number, member: GroupMember, direction: ArbDirection, limit: number): Promise<PlaceOrderResult> {
+async function placeOrder(maxSellAmount: bigint, member: GroupMember, direction: ArbDirection): Promise<PlaceOrderResult> {
     // This wrapper places a partially fillable limit order that sells up to [maxSellAmount] of the inToken at a price of [limit] each. 
     // If [direction] is ArbDirection.TO_GROUP, the bot sells member tokens for group tokens. If [direction] is ArbDirection.FROM_GROUP, the bot sells group tokens for member tokens.
     // The function also takes care of the approval with the cowswap vaultrelayer and signing of the order.
 
     // Approve the relayer to spend the token fi required
     const current_allowance = await checkAllowance(botAddress, CowSwapRelayerAddress, member.token_address);
-    if (Number(current_allowance) < maxSellAmount) {
+    if (current_allowance < maxSellAmount) {
+        // @todo approve only the outstanding amount
         console.log("Approving the relayer to spend the token...");
         await approveTokenWithRelayer(member.token_address);
     }
@@ -365,7 +369,7 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
     const sellToken = direction === ArbDirection.REDEEM ? member.token_address : groupTokenAddress;
     const buyToken = direction === ArbDirection.REDEEM ? groupTokenAddress : member.token_address;
 
-    const maxBuyAmount = maxSellAmount * limit;
+    const maxBuyAmount = maxSellAmount * (profitThresholdScale - profitThreshold) / profitThresholdScale;
 
     // Define the order
     const order: UnsignedOrder = {
@@ -373,7 +377,7 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
         buyToken: buyToken,
         sellAmount: maxSellAmount.toString(),
         buyAmount: maxBuyAmount.toString(),
-        validTo: validityCutoff, // Order valid for 1 hour
+        validTo: Math.floor(Date.now()/1000) + validityCutoff, // Order valid for 1 hour
         appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Taken via instructions from API Schema
         feeAmount: "0", // Adjust if necessary
         partiallyFillable: true,
@@ -419,6 +423,7 @@ async function main() {
         await new Promise((resolve) => setTimeout(resolve, waitingTime));
 
         // 1. Update open orders
+        console.log("Fetching open orders...");
         const openOrders = await getOpenOrders()
 
         if (openOrders.length >= maxOpenOrders) {
@@ -427,10 +432,11 @@ async function main() {
 
         // 2. Mint group tokens from bot's balance of trusted collateral        
         // TODO: Run this potentially only once we know the direction of the next trade?
-        await mintPossilbeGroupTokens(groupAddress, membersCache);
+        console.log("Minting group tokens...");
+        await mintPossibleGroupTokens(groupAddress, membersCache);
 
         // 3. Pick next members
-
+        console.log("Picking next members...");
         const nextPick = await pickNextMember(membersCache);
 
         if (nextPick === null) {
@@ -453,9 +459,8 @@ async function main() {
 
         // retrieve the total open amount from the orders
         const openOrderAmount = openOrders.reduce((acc, order) => {
-            return order.sellToken === groupTokenAddress ? acc + parseFloat(order.sellAmount) : acc;
-        }, 0);
-
+            return order.sellToken === groupTokenAddress ? acc + BigInt(order.sellAmount) : acc;
+        }, 0n);
         let availableBalance = currentBotGroupBalance - openOrderAmount;
         if (availableBalance <= 0) {
             console.log(`Skipping order placement as there is no available balance not already commited to an open order`);
@@ -463,13 +468,13 @@ async function main() {
         }
         
         // @todo one unaddressed problem is that the amount should also be a function of the current ratio: The closer to 1, the less we should invest due to slippage?
-        let investingAmount = availableBalance * bufferFraction;
+        let investingAmount = availableBalance;
 
         // 5. Redeem group tokens if necessary
         if (direction === ArbDirection.REDEEM) {
-            const collateralAmount = 0//(group.collateral.get(member) || 0) * bufferFraction;
-            const target_redeemAmount = Math.min(collateralAmount, investingAmount);
-            const redeemAmount = await redeemGroupTokens(target_redeemAmount, member);
+            const collateralAmount = 0n // placeholder for now
+            const targetRedeemAmount = collateralAmount < availableBalance ? collateralAmount : availableBalance;
+            const redeemAmount = await redeemGroupTokens(targetRedeemAmount, member);
             investingAmount = redeemAmount;
         } 
         
@@ -482,12 +487,9 @@ async function main() {
         placeOrder(
             investingAmount, 
             member,
-            direction,
-            1-profitThreshold);        
+            direction
+        );        
     }
 }
 
-
-
 main().catch(console.error);
-// console.log(members);
