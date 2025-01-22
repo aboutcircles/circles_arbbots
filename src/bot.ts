@@ -416,20 +416,16 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
         }
         return { success: false, error: errorMessage };
     }
-    }
+}
 
-
-    // Main function
-
-    async function main() {
+// Main function
+async function main() {
     await walletV6.init();
     sdk = new Sdk(walletV6, selectedCirclesConfig);
     botAvatar = await sdk.getAvatar(botAddress);
 
     const membersCache = await initializeMembersCache();
     const bot = await initializeBot();
-
-
 
     let run_while_loop = true;
     while (run_while_loop) {
