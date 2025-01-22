@@ -1,5 +1,16 @@
 // TypeScript code for the Circles arbitrage bot
+
+import "dotenv/config";
+import { log } from "console";
+import WebSocket from "ws";
+global.WebSocket = WebSocket as unknown as typeof globalThis.WebSocket;
+
+// Import ethers v5
 import { ethers, Contract } from "ethers";
+// Import ethers v6 (aliased in package.json)
+// @dev two ethers versions are required as v5 is used by CoWswap sdk and v6 by the Circles sdk
+import { ethers as ethers6 } from "ethers6";
+
 import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, OrderKind, SigningScheme, EnrichedOrder , OrderStatus} from "@cowprotocol/cow-sdk";
 import {
     BalancerApi,
@@ -8,52 +19,39 @@ import {
     Token,
     TokenAmount,
     Swap,
+    PriceImpact,
   } from "@balancer/sdk";
-  
-import { Client } from "pg";
+import { Avatar, circlesConfig, Sdk } from "@circles-sdk/sdk";
+import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
+import { CirclesData, CirclesRpc, TokenBalanceRow } from '@circles-sdk/data';
 
-import "dotenv/config";
-import { log } from "console";
+import pg from "pg"; // @dev pg is a CommonJS module
+const { Client } = pg;
 
+import {
+    ArbDirection,
+    Bot,
+    GroupMember,
+    MembersCache,
+    PlaceOrderResult,
+    NextPick
+} from "./interfaces/index.js";
 
-interface Bot {
-    balance: number;
-    address: string;
-    groupTokens: number;
-}
-
-interface GroupMember {
-    address: string;
-    token_address: string;
-    latest_price: bigint | null; // the value of the member token represented as the bigint representation of the amount of group tokens you get for 1 member token
-    last_price_update: number;
-}
-
-interface MembersCache {
-    lastUpdated: number;
-    members: GroupMember[];
-}
-
-enum ArbDirection {
-    REDEEM = "REDEEM",
-    GROUP_MINT = "GROUP_MINT",
-}
-
-type PlaceOrderResult = 
-    | { success: true; orderId: string }
-    | { success: false; error: string };
-
-type NextPick = 
-    | { member: GroupMember, direction: ArbDirection }
-    | null;
+// ABI
+import {
+    tokenApproveAbi,
+    erc20Abi,
+    erc1155Abi,
+    tokenWrapperAbi
+} from "./abi/index.js";
 
 // Algorithm parameters
-const epsilon: number = 0.01;
-const validityCutoff: number = 60 * 60 * 1000; // 1 hour in ms
+const profitThreshold: bigint = 10n; // the minimal per-trade relative profitability that the bot is willing to accept, represented as bigint in steps of the profitThresholdScale
+const profitThresholdScale: bigint = 1000n; // the scale of the profit threshold
+const validityCutoff: number = 60 * 60; // 1 hour in seconds
 const waitingTime: number = 1000; // 1 second
-const maxInvestingFraction: number = 0.1;
 const bufferFraction: number = 0.95;
-const maxOpenOrders: number = 10;
+const maxOpenOrders: number = 10; // added to avoid spamming cowswap with orders
 const ratioCutoff: number = 0.1 // this value determines at which point we consider prices to have equilibrated.
 
 // constants 
@@ -76,44 +74,20 @@ const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
 const CowSwapRelayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
 const tokenWrapperContractAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 
-// ABIs
-const tokenApproveAbi = [
-    {
-        inputs: [
-            { name: '_spender', type: 'address' },
-            { name: '_value', type: 'uint256' },
-        ],
-        name: 'approve',
-        outputs: [{ type: 'bool' }],
-        stateMutability: 'nonpayable',
-        type: 'function',
-    },
-];
-const erc20Abi = [
-    {
-        constant: true,
-        inputs: [{ name: "_owner", type: "address" }],
-        name: "balanceOf",
-        outputs: [{ name: "balance", type: "uint256" }],
-        type: "function",
-    },
-    {
-        constant: true,
-        inputs: [
-            { name: "_owner", type: "address" },
-            { name: "_spender", type: "address" }
-        ],
-        name: "allowance",
-        outputs: [{ name: "remaining", type: "uint256" }],
-        type: "function",
-    },
-];
-
-const tokenWrapperAbi = [{"inputs":[{"internalType":"contract IHubV2","name":"_hub","type":"address"},{"internalType":"contract INameRegistry","name":"_nameRegistry","type":"address"},{"internalType":"address","name":"_masterCopyERC20Demurrage","type":"address"},{"internalType":"address","name":"_masterCopyERC20Inflation","type":"address"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesAmountOverflow","type":"error"},{"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"uint256","name":"","type":"uint256"},{"internalType":"uint8","name":"","type":"uint8"}],"name":"CirclesErrorAddressUintArgs","type":"error"},{"inputs":[{"internalType":"uint8","name":"","type":"uint8"}],"name":"CirclesErrorNoArgs","type":"error"},{"inputs":[{"internalType":"address","name":"","type":"address"},{"internalType":"uint8","name":"","type":"uint8"}],"name":"CirclesErrorOneAddressArg","type":"error"},{"inputs":[{"internalType":"uint256","name":"providedId","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesIdMustBeDerivedFromAddress","type":"error"},{"inputs":[{"internalType":"uint256","name":"id","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesInvalidCirclesId","type":"error"},{"inputs":[{"internalType":"uint256","name":"parameter","type":"uint256"},{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesInvalidParameter","type":"error"},{"inputs":[],"name":"CirclesProxyAlreadyInitialized","type":"error"},{"inputs":[{"internalType":"uint8","name":"code","type":"uint8"}],"name":"CirclesReentrancyGuard","type":"error"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"avatar","type":"address"},{"indexed":true,"internalType":"address","name":"erc20Wrapper","type":"address"},{"indexed":false,"internalType":"enum CirclesType","name":"circlesType","type":"uint8"}],"name":"ERC20WrapperDeployed","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"contract Proxy","name":"proxy","type":"address"},{"indexed":false,"internalType":"address","name":"masterCopy","type":"address"}],"name":"ProxyCreation","type":"event"},{"inputs":[],"name":"ERC20_WRAPPER_SETUP_CALLPREFIX","outputs":[{"internalType":"bytes4","name":"","type":"bytes4"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"_avatar","type":"address"},{"internalType":"enum CirclesType","name":"_circlesType","type":"uint8"}],"name":"ensureERC20","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"enum CirclesType","name":"","type":"uint8"},{"internalType":"address","name":"","type":"address"}],"name":"erc20Circles","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"hub","outputs":[{"internalType":"contract IHubV2","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"","type":"uint256"}],"name":"masterCopyERC20Wrapper","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"nameRegistry","outputs":[{"internalType":"contract INameRegistry","name":"","type":"address"}],"stateMutability":"view","type":"function"}];
-
 // Initialize relevant objects
 const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+const providerV6 = new ethers6.JsonRpcProvider(rpcUrl);
+
 const wallet = new ethers.Wallet(botPrivateKey, provider);
+const walletV6 = new PrivateKeyContractRunner(providerV6, botPrivateKey);
+const selectedCirclesConfig = circlesConfig[100];
+const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
+const circlesData = new CirclesData(circlesRPC);
+
+let
+    sdk: Sdk | null,
+    botAvatar: Avatar | null;
+
 const orderBookApi = new OrderBookApi({ chainId: cowswapChainId });
 const balancerApi = new BalancerApi(
     "https://api-v3.balancer.fi/",
@@ -169,13 +143,13 @@ async function updateGroupMemberTokenAddresses(members: GroupMember[]): Promise<
 }
 
 
-async function checkAllowance(owner: string, spender: string, tokenAddress: string): Promise<ethers.BigNumber> {
+async function checkAllowance(owner: string, spender: string, tokenAddress: string): Promise<bigint> {
     // Create a contract instance for the token
     const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the allowance
     const allowance = await tokenContract.allowance(owner, spender);
-    return allowance
+    return allowance.toBigInt();
 }
 
 // Fetch the latest price for an individual token (in units of the group token)
@@ -233,7 +207,7 @@ async function initializeMembersCache(): Promise<MembersCache> {
     // We fetch the latest members from the database
     console.log("Fetching latest members...");
     const earlyNumber: number = 0;
-    var members = await getLatestGroupMembers(BigInt(earlyNumber));
+    let members = await getLatestGroupMembers(BigInt(earlyNumber));
 
     // We fetch the token addresses for the members
     console.log("Fetching token addresses...");
@@ -254,30 +228,30 @@ async function initializeMembersCache(): Promise<MembersCache> {
 }
 
 
-async function initializeBot(): Promise<Bot> {
-    // at this double check the bot has the required xDAI balance
-    return {
-        balance: 1000, // xDAI balance, needs to be made available first
-        address: botAddress,
-        groupTokens: 0, // Group token balance
-    };
-}
-
-
 // helper function to redeem as many group tokens for the target member as possible. We return the amount of group tokens redeemed
-async function redeemGroupTokens(max_amount: number, target_member: GroupMember): Promise<number> {
+
+async function redeemGroupTokens(max_amount: bigint, target_member: GroupMember): Promise<bigint> {
     // We redeem the group tokens. 
-    return 0;
+    return 0n;
 }
 
-async function getBotBalance(tokenAddress: string): Promise<number> {
+async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
     
     // Create a contract instance for the token
     const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the balance
     let balance = await tokenContract.balanceOf(botAddress);
-    return parseFloat(ethers.utils.formatEther(balance));
+    return balance.toBigInt();
+}
+
+async function getBotErc1155Balance(tokenAddress: string): Promise<number> {
+    // Create a contract instance for the token
+    const tokenContract = new ethers.Contract(selectedCirclesConfig.v2HubAddress, erc1155Abi, provider);
+
+    // Fetch the balance
+    const balance = await tokenContract.balanceOf(botAddress, ethers.BigNumber.from(tokenAddress));
+    return balance.toBigInt();
 }
 
 async function getOpenOrders(): Promise<EnrichedOrder[]> {
@@ -286,14 +260,53 @@ async function getOpenOrders(): Promise<EnrichedOrder[]> {
     return orders.filter((order) => order.status === OrderStatus.OPEN);
 }
 
-async function mintIndividualTokens() {
-    // We first get all the balances that the bot has
-    // let balances = await getBalances(botAddress);
-    // await mintFromGroup(balances);
+async function mintPossibleGroupTokens(group: string, membersCache: MembersCache) {
+    const botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(botAddress);
+    // Filter tokens to keep tokens of gorup members only and apply some other filters
+    const filteredTokens = botBalances.filter(token => {
+        // @todo add filter to skip dust amount
+        // Only keep version === 2 tokens and skip group tokens
+        if (token.version !== 2 || token.isGroup) return false;
+      
+        // Check if this token's owner matches (case-insensitive) any of the member addresses
+        return membersCache?.members.some(member => 
+            member.address.toLowerCase() === token.tokenOwner.toLowerCase()
+        );
+    });
+
+    // unwrap wrapped personal tokens to mint as a group token later
+    const unwrapQueue = filteredTokens.map(async (token) => {
+        if(token.isWrapped) {
+            if(token.isInflationary) {
+                await botAvatar.unwrapInflationErc20(token.tokenAddress, token.staticAttoCircles);
+            } else {
+                await botAvatar.unwrapDemurrageErc20(token.tokenAddress, token.staticAttoCircles);
+            }
+        }
+    });
+    await Promise.all(unwrapQueue);
+
+    await mintGroupTokensFromIndividualTokens(filteredTokens);
 }
 
-async function mintFromGroup(balances: number) {
-    // We then mint the individual tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
+async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow[]) {
+    // We then mint the group tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
+    // @todo filter duplications after unwrap
+    const tokenAvatars = tokensToMint.map(token => token.tokenOwner);
+    const tokenBalances = tokensToMint.map(token => token.attoCircles);
+    if(tokenAvatars.length > 0 && tokenAvatars.length === tokenBalances.length) {
+        await botAvatar.groupMint(
+            groupAddress,
+            tokenAvatars,
+            tokenBalances,
+            "0x"
+        );
+    }
+
+    const totalGroupTokensBalance = await getBotErc1155Balance(groupAddress);
+    // Wrap Group Tokens into ERC20
+    // @todo filter dust amounts
+    await botAvatar.wrapInflationErc20(groupAddress, totalGroupTokensBalance);
 }
 
 
@@ -326,7 +339,7 @@ async function pickNextMember(membersCache: MembersCache): Promise<NextPick> {
         return null;
     }
     let direction = log10(pickedMember.latest_price!) > 18 ? ArbDirection.REDEEM : ArbDirection.GROUP_MINT;
-    return { member: pickedMember, direction: direction};
+    return { member: pickedMember, direction: direction, suggestedAmount: 0n };
 }
 
 // Approve relayer to spend tokens
@@ -340,14 +353,15 @@ async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     console.log('Approval transaction confirmed');
   }
 
-async function placeOrder(maxSellAmount: number, member: GroupMember, direction: ArbDirection, limit: number): Promise<PlaceOrderResult> {
+async function placeOrder(maxSellAmount: bigint, member: GroupMember, direction: ArbDirection): Promise<PlaceOrderResult> {
     // This wrapper places a partially fillable limit order that sells up to [maxSellAmount] of the inToken at a price of [limit] each. 
     // If [direction] is ArbDirection.TO_GROUP, the bot sells member tokens for group tokens. If [direction] is ArbDirection.FROM_GROUP, the bot sells group tokens for member tokens.
     // The function also takes care of the approval with the cowswap vaultrelayer and signing of the order.
 
     // Approve the relayer to spend the token fi required
     const current_allowance = await checkAllowance(botAddress, CowSwapRelayerAddress, member.token_address);
-    if (Number(current_allowance) < maxSellAmount) {
+    if (current_allowance < maxSellAmount) {
+        // @todo approve only the outstanding amount
         console.log("Approving the relayer to spend the token...");
         await approveTokenWithRelayer(member.token_address);
     }
@@ -355,7 +369,7 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
     const sellToken = direction === ArbDirection.REDEEM ? member.token_address : groupTokenAddress;
     const buyToken = direction === ArbDirection.REDEEM ? groupTokenAddress : member.token_address;
 
-    const maxBuyAmount = maxSellAmount * limit;
+    const maxBuyAmount = maxSellAmount * (profitThresholdScale - profitThreshold) / profitThresholdScale;
 
     // Define the order
     const order: UnsignedOrder = {
@@ -363,7 +377,7 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
         buyToken: buyToken,
         sellAmount: maxSellAmount.toString(),
         buyAmount: maxBuyAmount.toString(),
-        validTo: validityCutoff, // Order valid for 1 hour
+        validTo: Math.floor(Date.now()/1000) + validityCutoff, // Order valid for 1 hour
         appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Taken via instructions from API Schema
         feeAmount: "0", // Adjust if necessary
         partiallyFillable: true,
@@ -394,22 +408,22 @@ async function placeOrder(maxSellAmount: number, member: GroupMember, direction:
         }
         return { success: false, error: errorMessage };
     }
-    }
-
+}
 
 // Main function
-
 async function main() {
+    await walletV6.init();
+    sdk = new Sdk(walletV6, selectedCirclesConfig);
+    botAvatar = await sdk.getAvatar(botAddress);
+
     const membersCache = await initializeMembersCache();
-    const bot = await initializeBot();
-
-
 
     let run_while_loop = true;
     while (run_while_loop) {
         await new Promise((resolve) => setTimeout(resolve, waitingTime));
 
         // 1. Update open orders
+        console.log("Fetching open orders...");
         const openOrders = await getOpenOrders()
 
         if (openOrders.length >= maxOpenOrders) {
@@ -417,44 +431,65 @@ async function main() {
         }
 
         // 2. Mint group tokens from bot's balance of trusted collateral        
-        // TODO: RUn this potentially only once we know the direction of the next trade?
-        await mintIndividualTokens();
+        // TODO: Run this potentially only once we know the direction of the next trade?
+        console.log("Minting group tokens...");
+        await mintPossibleGroupTokens(groupAddress, membersCache);
 
         // 3. Pick next members
-
+        console.log("Picking next members...");
         const nextPick = await pickNextMember(membersCache);
 
         if (nextPick === null) {
             continue;
         }
 
-        const { member, direction } = nextPick;
+        const { member, direction, suggestedAmount } = nextPick;
+
         console.log(`Picked member ${member.address} for ${direction} arbitrage`);
+        // If there's an open order with this member, we skip and choose the next best member
+        // @todo we should also check if the order is still valid?
+        // @todo we need to pick the next best members
+        if (openOrders.some(order => order.sellToken === member.token_address)) {
+            console.log(`Skipping member ${member.address} as there is already an open order with them`);
+            continue;
+        }
+
         // 4. Calculate investing amount
-        let currentBotBalance = await getBotBalance(member.token_address);
+        let currentBotGroupBalance = await getBotErc20Balance(groupTokenAddress);
 
-        const investingFraction = maxInvestingFraction / Math.max(1, openOrders.length);
-
-        var investingAmount = currentBotBalance * investingFraction * bufferFraction;
+        // retrieve the total open amount from the orders
+        const openOrderAmount = openOrders.reduce((acc, order) => {
+            return order.sellToken === groupTokenAddress ? acc + BigInt(order.sellAmount) : acc;
+        }, 0n);
+        let availableBalance = currentBotGroupBalance - openOrderAmount;
+        if (availableBalance <= 0) {
+            console.log(`Skipping order placement as there is no available balance not already commited to an open order`);
+            continue;
+        }
+        
+        // @todo one unaddressed problem is that the amount should also be a function of the current ratio: The closer to 1, the less we should invest due to slippage?
+        let investingAmount = availableBalance;
 
         // 5. Redeem group tokens if necessary
         if (direction === ArbDirection.REDEEM) {
-            const collateralAmount = 0//(group.collateral.get(member) || 0) * bufferFraction;
-            const target_redeemAmount = Math.min(collateralAmount, investingAmount);
-            const redeemAmount = await redeemGroupTokens(target_redeemAmount, member);
+            const collateralAmount = 0n // placeholder for now
+            const targetRedeemAmount = collateralAmount < availableBalance ? collateralAmount : availableBalance;
+            const redeemAmount = await redeemGroupTokens(targetRedeemAmount, member);
             investingAmount = redeemAmount;
         } 
         
+        if (investingAmount <= 0) {
+            console.log(`Skipping order placement as either there is no assets to invest or the price impact is too high.`);
+            continue;
+        }
+
         // 6. Place order
         placeOrder(
             investingAmount, 
             member,
-            direction,
-            1-epsilon);        
+            direction
+        );        
     }
 }
 
-
-
 main().catch(console.error);
-// console.log(members);
