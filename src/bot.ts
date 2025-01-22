@@ -239,7 +239,7 @@ async function initializeBot(): Promise<Bot> {
 
 // helper function to redeem as many group tokens for the target member as possible. We return the amount of group tokens redeemed
 async function redeemGroupTokens(max_amount: number, target_member: GroupMember): Promise<number> {
-    // We redeem the group tokens. 
+    // We redeem the group tokens.
     return 0;
 }
 
@@ -253,14 +253,13 @@ async function getBotErc20Balance(tokenAddress: string): Promise<number> {
     return parseFloat(ethers.utils.formatEther(balance));
 }
 
-async function getBotErc1155Balance(tokenAddress: string): Promise<string> {
-    
+async function getBotErc1155Balance(tokenAddress: string): Promise<number> {
     // Create a contract instance for the token
     const tokenContract = new ethers.Contract(selectedCirclesConfig.v2HubAddress, erc1155Abi, provider);
 
     // Fetch the balance
     const balance = await tokenContract.balanceOf(botAddress, ethers.BigNumber.from(tokenAddress));
-    return balance.toString();
+    return balance.toBigInt();
 }
 
 async function getOpenOrders(): Promise<EnrichedOrder[]> {
