@@ -45,12 +45,11 @@ import {
 } from "./abi/index.js";
 
 // Algorithm parameters
-const epsilon: number = 0.01;
+const profitThreshold: number = 0.01; // the minimal per-trade relative profitability that the bot is willing to accept
 const validityCutoff: number = 60 * 60 * 1000; // 1 hour in ms
 const waitingTime: number = 1000; // 1 second
-const maxInvestingFraction: number = 0.1;
 const bufferFraction: number = 0.95;
-const maxOpenOrders: number = 10;
+const maxOpenOrders: number = 10; // added to avoid spamming cowswap with orders
 const ratioCutoff: number = 0.1 // this value determines at which point we consider prices to have equilibrated.
 
 // constants 
@@ -227,16 +226,6 @@ async function initializeMembersCache(): Promise<MembersCache> {
 }
 
 
-async function initializeBot(): Promise<Bot> {
-    // at this double check the bot has the required xDAI balance
-    return {
-        balance: 1000, // xDAI balance, needs to be made available first
-        address: botAddress,
-        groupTokens: 0, // Group token balance
-    };
-}
-
-
 // helper function to redeem as many group tokens for the target member as possible. We return the amount of group tokens redeemed
 async function redeemGroupTokens(max_amount: number, target_member: GroupMember): Promise<number> {
     // We redeem the group tokens.
@@ -282,7 +271,7 @@ async function mintPossilbeGroupTokens(group: string, membersCache: MembersCache
         );
     });
 
-    // unwrap wraped personal tokens to mint as a group token later
+    // unwrap wrapped personal tokens to mint as a group token later
     const unwrapQueue = filteredTokens.map(async (token) => {
         if(token.isWrapped) {
             if(token.isInflationary) {
@@ -347,7 +336,7 @@ async function pickNextMember(membersCache: MembersCache): Promise<NextPick> {
         return null;
     }
     let direction = log10(pickedMember.latest_price!) > 18 ? ArbDirection.REDEEM : ArbDirection.GROUP_MINT;
-    return { member: pickedMember, direction: direction};
+    return { member: pickedMember, direction: direction, suggestedAmount: 0n };
 }
 
 // Approve relayer to spend tokens
@@ -424,7 +413,6 @@ async function main() {
     botAvatar = await sdk.getAvatar(botAddress);
 
     const membersCache = await initializeMembersCache();
-    const bot = await initializeBot();
 
     let run_while_loop = true;
     while (run_while_loop) {
@@ -449,14 +437,33 @@ async function main() {
             continue;
         }
 
-        const { member, direction } = nextPick;
+        const { member, direction, suggestedAmount } = nextPick;
+
         console.log(`Picked member ${member.address} for ${direction} arbitrage`);
+        // If there's an open order with this member, we skip and choose the next best member
+        // @todo we should also check if the order is still valid?
+        // @todo we need to pick the next best members
+        if (openOrders.some(order => order.sellToken === member.token_address)) {
+            console.log(`Skipping member ${member.address} as there is already an open order with them`);
+            continue;
+        }
+
         // 4. Calculate investing amount
-        let currentBotBalance = await getBotErc20Balance(member.token_address);
+        let currentBotGroupBalance = await getBotErc20Balance(groupTokenAddress);
 
-        const investingFraction = maxInvestingFraction / Math.max(1, openOrders.length);
+        // retrieve the total open amount from the orders
+        const openOrderAmount = openOrders.reduce((acc, order) => {
+            return order.sellToken === groupTokenAddress ? acc + parseFloat(order.sellAmount) : acc;
+        }, 0);
 
-        var investingAmount = currentBotBalance * investingFraction * bufferFraction;
+        let availableBalance = currentBotGroupBalance - openOrderAmount;
+        if (availableBalance <= 0) {
+            console.log(`Skipping order placement as there is no available balance not already commited to an open order`);
+            continue;
+        }
+        
+        // @todo one unaddressed problem is that the amount should also be a function of the current ratio: The closer to 1, the less we should invest due to slippage?
+        let investingAmount = availableBalance * bufferFraction;
 
         // 5. Redeem group tokens if necessary
         if (direction === ArbDirection.REDEEM) {
@@ -466,12 +473,17 @@ async function main() {
             investingAmount = redeemAmount;
         } 
         
+        if (investingAmount <= 0) {
+            console.log(`Skipping order placement as either there is no assets to invest or the price impact is too high.`);
+            continue;
+        }
+
         // 6. Place order
         placeOrder(
             investingAmount, 
             member,
             direction,
-            1-epsilon);        
+            1-profitThreshold);        
     }
 }
 

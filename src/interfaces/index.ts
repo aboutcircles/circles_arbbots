@@ -26,5 +26,5 @@ export type PlaceOrderResult =
     | { success: false; error: string };
 
 export type NextPick = 
-    | { member: GroupMember, direction: ArbDirection }
+    | { member: GroupMember, direction: ArbDirection , suggestedAmount: bigint }
     | null;
