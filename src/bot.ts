@@ -19,7 +19,6 @@ import {
     Token,
     TokenAmount,
     Swap,
-    PriceImpact,
   } from "@balancer/sdk";
 import { Avatar, circlesConfig, Sdk } from "@circles-sdk/sdk";
 import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
@@ -190,6 +189,43 @@ async function fetchLatestPrice(tokenAddress: string): Promise<bigint | null> {
 }
 
 
+// Fetch the latest price for an individual token (in units of the group token)
+async function fetchBalancerQuote(tokenAddress: string): Promise<bigint | null> {
+
+    const memberToken = new Token(
+        chainId,
+        tokenAddress as `0x${string}`,
+        18,
+        "Member Token"
+    );
+
+    const swapKind = SwapKind.GivenOut;
+
+    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths({
+        chainId,
+        tokenIn: balancerGroupToken.address,
+        tokenOut: memberToken.address,
+        swapKind: swapKind,
+        swapAmount: TokenAmount.fromHumanAmount(memberToken, "1.0")
+    });
+
+    // if there is no path, we return null
+    if (sorPaths.length === 0) {
+        return null;
+    }
+
+    // Swap object provides useful helpers for re-querying, building call, etc
+    const swap = new Swap({
+        chainId,
+        paths: sorPaths,
+        swapKind,
+    });
+
+    // the price of the member token (in units of group tokken) is the inverse of the number of tokens I get out for one grouptoken
+    return swap.inputAmount.amount
+
+}
+
 async function checkLatestPrices(members: GroupMember[]): Promise<GroupMember[]> {
     // we call the contract 1 by 1 for each address
     for (let i = 0; i < members.length; i++) {
@@ -217,8 +253,8 @@ async function initializeMembersCache(): Promise<MembersCache> {
     members = members.filter((member) => member.token_address !== ethers.constants.AddressZero);
 
     // We fetch the latest price for the members
-    console.log("Fetching latest prices...");
-    members = await checkLatestPrices(members);
+    // console.log("Fetching latest prices...");
+    // members = await checkLatestPrices(members);
 
     console.log(members);
     return {
@@ -310,36 +346,78 @@ async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow
 }
 
 
-async function pickNextMember(membersCache: MembersCache): Promise<NextPick> {
+async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOrder[]): Promise<NextPick> {
     // Logic to pick next members using exploration/exploitation trade-off
 
-    // In a first step we filter out members without a price
-    let members = membersCache.members.filter((member) => member.latest_price !== null);
+    // // In a first step we filter out members without a price
+    // let members = membersCache.members.filter((member) => member.latest_price !== null);
+    // if (members.length === 0) {
+    //     console.log("No members with a price found");
+    //     return null;
+    // }    
+
+    // // For now we use a dummy logic: we pick the member whose token's price is the farthest away from 1. If that is within the cutoff, we do nothing.
+    
+    // // some helpfer functions to let us calculate the ratio of a bigint
+    // function log10(bigint:bigint) {
+    //     if (bigint < 0) return NaN;
+    //     const s = bigint.toString(10);
+    //     return s.length + Math.log10(parseFloat("0." + s.substring(0, 15)))
+    //   }
+
+    // let logdiff = (a: bigint) => Number(Math.abs(log10(a) - 18));
+    
+    // // we sort the members by the highest abs diff function evaluated on the latest value
+    // let sortedMembers = members.sort((a, b) => logdiff(b.latest_price!) - logdiff(a.latest_price!));
+    // // we take the first and last member as candidates
+    // let pickedMember = sortedMembers[0];
+    // if (logdiff(pickedMember.latest_price!) < ratioCutoff) {
+    //     return null;
+    // }
+    // let direction = log10(pickedMember.latest_price!) > 18 ? ArbDirection.REDEEM : ArbDirection.GROUP_MINT;
+    // return { member: pickedMember, direction: direction, suggestedAmount: 0n };
+
+    // we filterout the members with open orders
+    let members = membersCache.members.filter((member) => !openOrders.some(order => order.sellToken === member.token_address));
+
+    //if there are no members left, we return null
     if (members.length === 0) {
-        console.log("No members with a price found");
-        return null;
-    }    
-
-    // For now we use a dummy logic: we pick the member whose token's price is the farthest away from 1. If that is within the cutoff, we do nothing.
-    
-    // some helpfer functions to let us calculate the ratio of a bigint
-    function log10(bigint:bigint) {
-        if (bigint < 0) return NaN;
-        const s = bigint.toString(10);
-        return s.length + Math.log10(parseFloat("0." + s.substring(0, 15)))
-      }
-
-    let logdiff = (a: bigint) => Number(Math.abs(log10(a) - 18));
-    
-    // we sort the members by the highest abs diff function evaluated on the latest value
-    let sortedMembers = members.sort((a, b) => logdiff(b.latest_price!) - logdiff(a.latest_price!));
-    // we take the first and last member as candidates
-    let pickedMember = sortedMembers[0];
-    if (logdiff(pickedMember.latest_price!) < ratioCutoff) {
+        console.log("No members without open orders found");
         return null;
     }
-    let direction = log10(pickedMember.latest_price!) > 18 ? ArbDirection.REDEEM : ArbDirection.GROUP_MINT;
-    return { member: pickedMember, direction: direction, suggestedAmount: 0n };
+
+    // Randomly select members for now
+    let highestProfit = 0n;
+    let best_member = members[0];
+
+    // we take a number of samples and then pick the best one that doesn't already have an open order
+    let NSamples = 10;
+
+    for (let i = 0; i < NSamples; i++) {
+        // random member
+        let member = membersCache.members[Math.floor(Math.random() * membersCache.members.length)];
+
+        // for now we only go the simple arbitrage route
+        let direction = ArbDirection.GROUP_MINT;
+        // we check at what price we can get a member token
+        let requiredInputAmount = await fetchBalancerQuote(member.token_address);
+        if (requiredInputAmount === null) {
+            continue;
+        }
+        let expectedProfit = BigInt(10**18) - requiredInputAmount;
+        if (expectedProfit > highestProfit) {
+            highestProfit = expectedProfit;
+            best_member = member;
+        }
+    }
+
+    if (highestProfit <= 0n) {
+        console.log("No profitable trades found");
+        return null
+    }   
+
+    return { member: best_member, direction: ArbDirection.GROUP_MINT, suggestedAmount: BigInt(10 ** 18) - highestProfit};
+
 }
 
 // Approve relayer to spend tokens
@@ -437,7 +515,7 @@ async function main() {
 
         // 3. Pick next members
         console.log("Picking next members...");
-        const nextPick = await pickNextMember(membersCache);
+        const nextPick = await pickNextMember(membersCache, openOrders);
 
         if (nextPick === null) {
             continue;
@@ -446,13 +524,13 @@ async function main() {
         const { member, direction, suggestedAmount } = nextPick;
 
         console.log(`Picked member ${member.address} for ${direction} arbitrage`);
-        // If there's an open order with this member, we skip and choose the next best member
-        // @todo we should also check if the order is still valid?
-        // @todo we need to pick the next best members
-        if (openOrders.some(order => order.sellToken === member.token_address)) {
-            console.log(`Skipping member ${member.address} as there is already an open order with them`);
-            continue;
-        }
+        // // If there's an open order with this member, we skip and choose the next best member
+        // // @todo we should also check if the order is still valid?
+        // // @todo we need to pick the next best members
+        // if (openOrders.some(order => order.sellToken === member.token_address)) {
+        //     console.log(`Skipping member ${member.address} as there is already an open order with them`);
+        //     continue;
+        // }
 
         // 4. Calculate investing amount
         let currentBotGroupBalance = await getBotErc20Balance(groupTokenAddress);
@@ -468,7 +546,7 @@ async function main() {
         }
         
         // @todo one unaddressed problem is that the amount should also be a function of the current ratio: The closer to 1, the less we should invest due to slippage?
-        let investingAmount = availableBalance;
+        let investingAmount = suggestedAmount < availableBalance ? suggestedAmount : availableBalance;
 
         // 5. Redeem group tokens if necessary
         if (direction === ArbDirection.REDEEM) {
