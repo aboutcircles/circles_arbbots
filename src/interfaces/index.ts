@@ -1,3 +1,6 @@
+import { Swap } from "@balancer/sdk";
+
+
 export interface Bot {
     balance: number;
     address: string;
@@ -26,5 +29,5 @@ export type PlaceOrderResult =
     | { success: false; error: string };
 
 export type NextPick = 
-    | { member: GroupMember, direction: ArbDirection , suggestedAmount: bigint }
+    | { member: GroupMember, direction: ArbDirection , swap: Swap }
     | null;

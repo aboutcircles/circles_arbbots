@@ -168,14 +168,15 @@ async function fetchLatestPrice(tokenAddress: string): Promise<bigint | null> {
     );
 
     const swapKind = SwapKind.GivenIn;
-
-    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths({
+    const pathInput = {
         chainId,
         tokenIn: memberToken.address,
         tokenOut: balancerGroupToken.address,
         swapKind: swapKind,
         swapAmount: TokenAmount.fromHumanAmount(memberToken, "1.0")
-    });
+    }
+    // console.log(pathInput);
+    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
 
     // if there is no path, we return null
     if (sorPaths.length === 0) {
@@ -196,7 +197,7 @@ async function fetchLatestPrice(tokenAddress: string): Promise<bigint | null> {
 
 
 // Fetch the latest price for an individual token (in units of the group token)
-async function fetchBalancerQuote(tokenAddress: string): Promise<bigint | null> {
+async function fetchBalancerQuote(tokenAddress: string): Promise<Swap | null> {
 
     const memberToken = new Token(
         chainId,
@@ -206,15 +207,14 @@ async function fetchBalancerQuote(tokenAddress: string): Promise<bigint | null> 
     );
 
     const swapKind = SwapKind.GivenOut;
-
-    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths({
+    const pathInput = {
         chainId,
         tokenIn: balancerGroupToken.address,
         tokenOut: memberToken.address,
         swapKind: swapKind,
         swapAmount: TokenAmount.fromHumanAmount(memberToken, "1.0")
-    });
-
+    }
+    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
     // if there is no path, we return null
     if (sorPaths.length === 0) {
         return null;
@@ -227,8 +227,7 @@ async function fetchBalancerQuote(tokenAddress: string): Promise<bigint | null> 
         swapKind,
     });
 
-    // the price of the member token (in units of group tokken) is the inverse of the number of tokens I get out for one grouptoken
-    return swap.inputAmount.amount
+    return swap
 
 }
 
@@ -395,6 +394,7 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
     // Randomly select members for now
     let highestProfit = 0n;
     let best_member = members[0];
+    let best_swap: Swap;
 
     // we take a number of samples and then pick the best one that doesn't already have an open order
     let NSamples = 10;
@@ -406,14 +406,15 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
         // for now we only go the simple arbitrage route
         let direction = ArbDirection.GROUP_MINT;
         // we check at what price we can get a member token
-        let requiredInputAmount = await fetchBalancerQuote(member.token_address);
-        if (requiredInputAmount === null) {
+        let swap = await fetchBalancerQuote(member.token_address);
+        if (swap === null) {
             continue;
         }
-        let expectedProfit = BigInt(10**18) - requiredInputAmount;
+        let expectedProfit = BigInt(10**18) - swap.inputAmount.amount;
         if (expectedProfit > highestProfit) {
             highestProfit = expectedProfit;
             best_member = member;
+            best_swap = swap;
         }
     }
 
@@ -422,7 +423,7 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
         return null
     }   
 
-    return { member: best_member, direction: ArbDirection.GROUP_MINT, suggestedAmount: BigInt(10 ** 18) - highestProfit};
+    return { member: best_member, direction: ArbDirection.GROUP_MINT, swap: best_swap!};
 
 }
 
@@ -529,9 +530,9 @@ async function main() {
             continue;
         }
 
-        const { member, direction, suggestedAmount } = nextPick;
+        const { member, direction, swap } = nextPick;
 
-        console.log(`Picked member ${member.address} for ${direction} arbitrage and suggested amount of ${suggestedAmount}`);
+        console.log(`Picked member ${member.address} for ${direction} arbitrage and suggested amount of ${suggestedSwap.amount}`);
         // // If there's an open order with this member, we skip and choose the next best member
         // // @todo we should also check if the order is still valid?
         // // @todo we need to pick the next best members
@@ -554,14 +555,14 @@ async function main() {
         }
         
         // @todo one unaddressed problem is that the amount should also be a function of the current ratio: The closer to 1, the less we should invest due to slippage?
-        let investingAmount = suggestedAmount < availableBalance ? suggestedAmount : availableBalance;
+        let investingAmount = swap.inputAmount.amount//suggestedAmount < availableBalance ? suggestedAmount : availableBalance;
 
         // 5. Redeem group tokens if necessary
         if (direction === ArbDirection.REDEEM) {
             const collateralAmount = 0n // placeholder for now
             const targetRedeemAmount = collateralAmount < availableBalance ? collateralAmount : availableBalance;
             const redeemAmount = await redeemGroupTokens(targetRedeemAmount, member);
-            investingAmount = redeemAmount;
+            // investingAmount = redeemAmount;
         } 
         
         if (investingAmount <= 0) {
@@ -569,7 +570,7 @@ async function main() {
             continue;
         }
 
-        await swapUsingBalancer(member.token_address, groupTokenAddress, investingAmount, direction);
+        const balancerTradeRecept = await swapUsingBalancer(member.token_address, swap, direction);
 
         // 6. Place order
         // placeOrder(
@@ -582,31 +583,7 @@ async function main() {
 
 main().catch(console.error);
 
-async function swapUsingBalancer(tokenAddress: string, groupTokenAddress: string, investingAmount: bigint, direction: ArbDirection) {
-    // Swap object provides useful helpers for re-querying, building call, etc
-    const memberToken = new Token(
-        chainId,
-        tokenAddress as `0x${string}`,
-        18,
-        "Member Token"
-    );
-
-    const swapKind = SwapKind.GivenIn;
-
-    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths({
-        chainId,
-        tokenIn: balancerGroupToken.address,
-        tokenOut: memberToken.address,
-        swapKind: swapKind,
-        swapAmount: TokenAmount.fromRawAmount(balancerGroupToken, investingAmount)
-    });
-    console.log(sorPaths);
-    const swap = new Swap({
-        chainId,
-        paths: sorPaths,
-        swapKind,
-    });
-
+async function swapUsingBalancer(tokenAddress: string, swap: Swap, direction: ArbDirection): Promise<ethers.providers.TransactionReceipt> {
     console.log(
         `Input token: ${swap.inputAmount.token.address}, Amount: ${swap.inputAmount.amount}`
     );
@@ -621,12 +598,9 @@ async function swapUsingBalancer(tokenAddress: string, groupTokenAddress: string
     const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
     const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
     const slippage = Slippage.fromPercentage("0.1"); // 0.1%
-    // const swapAmount = TokenAmount.fromHumanAmount(tokenIn, "1.2345678910");
     
 
     let buildInput: SwapBuildCallInput;
-    // In v2 the sender/recipient can be set, in v3 it is always the msg.sender
-
     
     buildInput = {
         slippage,
@@ -642,7 +616,7 @@ async function swapUsingBalancer(tokenAddress: string, groupTokenAddress: string
     console.log("Swap call data:", callData);
 
     const groupTokenContract = new ethers.Contract(tokenAddress, erc20Abi, wallet);
-    const approveTx = await groupTokenContract.approve(vaultAddress, investingAmount);
+    const approveTx = await groupTokenContract.approve(vaultAddress, swap.inputAmount.amount);
     await approveTx.wait();
 
     const txResponse = await wallet.sendTransaction(callData);
