@@ -15,11 +15,16 @@ import { OrderBookApi, SupportedChainId, OrderSigningUtils, UnsignedOrder, Order
 import {
     BalancerApi,
     ChainId,
+    Slippage,
     SwapKind,
     Token,
     TokenAmount,
     Swap,
+    SwapBuildOutputExactIn,
+    SwapBuildCallInput,
+    ExactInQueryOutput
   } from "@balancer/sdk";
+  
 import { Avatar, circlesConfig, Sdk } from "@circles-sdk/sdk";
 import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
 import { CirclesData, CirclesRpc, TokenBalanceRow } from '@circles-sdk/data';
@@ -72,6 +77,7 @@ const groupAddress = process.env.TEST_GROUP_ADDRESS!;
 const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
 const CowSwapRelayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
 const tokenWrapperContractAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
+const vaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
 
 // Initialize relevant objects
 const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
@@ -447,14 +453,14 @@ async function placeOrder(maxSellAmount: bigint, member: GroupMember, direction:
     const sellToken = direction === ArbDirection.REDEEM ? member.token_address : groupTokenAddress;
     const buyToken = direction === ArbDirection.REDEEM ? groupTokenAddress : member.token_address;
 
-    const maxBuyAmount = maxSellAmount * (profitThresholdScale - profitThreshold) / profitThresholdScale;
+    // const maxBuyAmount = maxSellAmount * (profitThresholdScale - profitThreshold) / profitThresholdScale;
 
     // Define the order
     const order: UnsignedOrder = {
         sellToken: sellToken,
         buyToken: buyToken,
         sellAmount: maxSellAmount.toString(),
-        buyAmount: maxBuyAmount.toString(),
+        buyAmount: BigInt(10**18).toString(),//maxBuyAmount.toString(),
         validTo: Math.floor(Date.now()/1000) + validityCutoff, // Order valid for 1 hour
         appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Taken via instructions from API Schema
         feeAmount: "0", // Adjust if necessary
@@ -513,7 +519,7 @@ async function main() {
         // 2. Mint group tokens from bot's balance of trusted collateral        
         // TODO: Run this potentially only once we know the direction of the next trade?
         console.log("Minting group tokens...");
-        await mintPossibleGroupTokens(groupAddress, membersCache);
+        // await mintPossibleGroupTokens(groupAddress, membersCache);
 
         // 3. Pick next members
         console.log("Picking next members...");
@@ -563,13 +569,87 @@ async function main() {
             continue;
         }
 
+        await swapUsingBalancer(member.token_address, groupTokenAddress, investingAmount, direction);
+
         // 6. Place order
-        placeOrder(
-            investingAmount, 
-            member,
-            direction
-        );        
+        // placeOrder(
+        //     investingAmount, 
+        //     member,
+        //     direction
+        // );        
     }
 }
 
 main().catch(console.error);
+
+async function swapUsingBalancer(tokenAddress: string, groupTokenAddress: string, investingAmount: bigint, direction: ArbDirection) {
+    // Swap object provides useful helpers for re-querying, building call, etc
+    const memberToken = new Token(
+        chainId,
+        tokenAddress as `0x${string}`,
+        18,
+        "Member Token"
+    );
+
+    const swapKind = SwapKind.GivenIn;
+
+    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths({
+        chainId,
+        tokenIn: balancerGroupToken.address,
+        tokenOut: memberToken.address,
+        swapKind: swapKind,
+        swapAmount: TokenAmount.fromRawAmount(balancerGroupToken, investingAmount)
+    });
+    console.log(sorPaths);
+    const swap = new Swap({
+        chainId,
+        paths: sorPaths,
+        swapKind,
+    });
+
+    console.log(
+        `Input token: ${swap.inputAmount.token.address}, Amount: ${swap.inputAmount.amount}`
+    );
+    console.log(
+        `Output token: ${swap.outputAmount.token.address}, Amount: ${swap.outputAmount.amount}`
+    );
+
+    // Get up to date swap result by querying onchain
+    const updated = await swap.query(rpcUrl) as ExactInQueryOutput;
+    console.log(`Updated amount: ${updated.expectedAmountOut}`);
+
+    const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
+    const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
+    const slippage = Slippage.fromPercentage("0.1"); // 0.1%
+    // const swapAmount = TokenAmount.fromHumanAmount(tokenIn, "1.2345678910");
+    
+
+    let buildInput: SwapBuildCallInput;
+    // In v2 the sender/recipient can be set, in v3 it is always the msg.sender
+
+    
+    buildInput = {
+        slippage,
+        deadline,
+        queryOutput: updated,
+        wethIsEth,
+        sender: botAddress as `0x${string}`,
+        recipient: botAddress as `0x${string}`,
+    };
+    
+    const callData = swap.buildCall(buildInput) as SwapBuildOutputExactIn;
+
+    console.log("Swap call data:", callData);
+
+    const groupTokenContract = new ethers.Contract(tokenAddress, erc20Abi, wallet);
+    const approveTx = await groupTokenContract.approve(vaultAddress, investingAmount);
+    await approveTx.wait();
+
+    const txResponse = await wallet.sendTransaction(callData);
+      
+    const txReceipt = await txResponse.wait();
+    console.log("Swap executed in tx:", txReceipt.transactionHash);
+
+    return txReceipt;
+
+}
