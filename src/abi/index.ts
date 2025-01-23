@@ -1,16 +1,4 @@
 // ABIs
-export const tokenApproveAbi = [
-    {
-        inputs: [
-            { name: '_spender', type: 'address' },
-            { name: '_value', type: 'uint256' },
-        ],
-        name: 'approve',
-        outputs: [{ type: 'bool' }],
-        stateMutability: 'nonpayable',
-        type: 'function',
-    },
-];
 export const erc20Abi = [
     {
         constant: true,
@@ -29,6 +17,16 @@ export const erc20Abi = [
         outputs: [{ name: "remaining", type: "uint256" }],
         type: "function",
     },
+    {
+        inputs: [
+            { name: '_spender', type: 'address' },
+            { name: '_value', type: 'uint256' },
+        ],
+        name: 'approve',
+        outputs: [{ type: 'bool' }],
+        stateMutability: 'nonpayable',
+        type: 'function',
+    }
 ];
 
 export const erc1155Abi = [

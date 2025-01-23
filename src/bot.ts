@@ -43,7 +43,6 @@ import {
 
 // ABI
 import {
-    tokenApproveAbi,
     erc20Abi,
     erc1155Abi,
     tokenWrapperAbi
@@ -431,7 +430,7 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
 async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     // This function approves the token over maximal amounts for now, since we consider the vaultRelayer to be trustworthy (in light of protection mechanisms on their part)
 
-    const tokenContract = new Contract(tokenAddress, tokenApproveAbi, wallet);
+    const tokenContract = new Contract(tokenAddress, erc20Abi, wallet);
     const tx = await tokenContract.approve(CowSwapRelayerAddress,allowanceAmount);
     console.log('Approval transaction:', tx);
     await tx.wait();
@@ -532,7 +531,7 @@ async function main() {
 
         const { member, direction, swap } = nextPick;
 
-        console.log(`Picked member ${member.address} for ${direction} arbitrage and suggested amount of ${suggestedSwap.amount}`);
+        console.log(`Picked member ${member.address} for ${direction} arbitrage and suggested amount of ${swap.inputAmount.amount}`);
         // // If there's an open order with this member, we skip and choose the next best member
         // // @todo we should also check if the order is still valid?
         // // @todo we need to pick the next best members
@@ -615,11 +614,11 @@ async function swapUsingBalancer(tokenAddress: string, swap: Swap, direction: Ar
 
     console.log("Swap call data:", callData);
 
-    const groupTokenContract = new ethers.Contract(tokenAddress, erc20Abi, wallet);
+    const groupTokenContract = new ethers.Contract(balancerGroupToken.address, erc20Abi, wallet);
     const approveTx = await groupTokenContract.approve(vaultAddress, swap.inputAmount.amount);
     await approveTx.wait();
 
-    const txResponse = await wallet.sendTransaction(callData);
+    const txResponse = await wallet.sendTransaction({to: callData.to, data: callData.callData});
       
     const txReceipt = await txResponse.wait();
     console.log("Swap executed in tx:", txReceipt.transactionHash);
