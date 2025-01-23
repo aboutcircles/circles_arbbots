@@ -11,7 +11,7 @@ export interface GroupMember {
     address: string;
     token_address: string;
     latest_price: bigint | null; // the price of the member token in units of the group token in human readonable format
-    last_price_update: number;
+    last_price_update: number | null; // the timestamp of the last price update
 }
 
 export interface MembersCache {

@@ -156,44 +156,6 @@ async function checkAllowance(owner: string, spender: string, tokenAddress: stri
     return allowance.toBigInt();
 }
 
-// Fetch the latest price for an individual token (in units of the group token)
-async function fetchLatestPrice(tokenAddress: string): Promise<bigint | null> {
-
-    const memberToken = new Token(
-        chainId,
-        tokenAddress as `0x${string}`,
-        18,
-        "Member Token"
-    );
-
-    const swapKind = SwapKind.GivenIn;
-    const pathInput = {
-        chainId,
-        tokenIn: memberToken.address,
-        tokenOut: balancerGroupToken.address,
-        swapKind: swapKind,
-        swapAmount: TokenAmount.fromHumanAmount(memberToken, "1.0")
-    }
-    // console.log(pathInput);
-    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
-
-    // if there is no path, we return null
-    if (sorPaths.length === 0) {
-        return null;
-    }
-
-    // Swap object provides useful helpers for re-querying, building call, etc
-    const swap = new Swap({
-        chainId,
-        paths: sorPaths,
-        swapKind,
-    });
-
-    // the price of the member token (in units of group tokken) is the inverse of the number of tokens I get out for one grouptoken
-    return swap.outputAmount.amount
-
-}
-
 
 // Fetch the latest price for an individual token (in units of the group token)
 async function fetchBalancerQuote(tokenAddress: string): Promise<Swap | null> {
@@ -234,7 +196,8 @@ async function checkLatestPrices(members: GroupMember[]): Promise<GroupMember[]>
     // we call the contract 1 by 1 for each address
     for (let i = 0; i < members.length; i++) {
         const member = members[i];
-        member.latest_price = await fetchLatestPrice(member.token_address);
+        const quote = await fetchBalancerQuote(member.token_address);
+        member.latest_price = quote!.inputAmount.amount;
         member.last_price_update = Date.now();
     }
     return members;
@@ -300,7 +263,7 @@ async function getOpenOrders(): Promise<EnrichedOrder[]> {
     return orders.filter((order) => order.status === OrderStatus.OPEN);
 }
 
-async function mintPossibleGroupTokens(group: string, membersCache: MembersCache) {
+async function mintPossibleGroupTokens(group: string, membersCache: MembersCache, threshold: number) {
     const botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(botAddress);
     // Filter tokens to keep tokens of gorup members only and apply some other filters
     const filteredTokens = botBalances.filter(token => {
@@ -313,6 +276,10 @@ async function mintPossibleGroupTokens(group: string, membersCache: MembersCache
             member.address.toLowerCase() === token.tokenOwner.toLowerCase()
         );
     });
+
+    // Some logic to order the members by increasing value and then mint group tokens starting with the least valuable tokens until we reach the threshold
+    // Attention: Need to take care of the case where the have tokens for which we don't yet have a price => in this case we should fetch the price
+    //@todo: needs to be implemented
 
     // unwrap wrapped personal tokens to mint as a group token later
     const unwrapQueue = filteredTokens.map(async (token) => {
@@ -516,12 +483,7 @@ async function main() {
             continue;
         }
 
-        // 2. Mint group tokens from bot's balance of trusted collateral        
-        // TODO: Run this potentially only once we know the direction of the next trade?
-        console.log("Minting group tokens...");
-        // await mintPossibleGroupTokens(groupAddress, membersCache);
-
-        // 3. Pick next members
+        // 2. Decide next swap
         console.log("Picking next members...");
         const nextPick = await pickNextMember(membersCache, openOrders);
 
@@ -532,13 +494,33 @@ async function main() {
         const { member, direction, swap } = nextPick;
 
         console.log(`Picked member ${member.address} for ${direction} arbitrage and suggested amount of ${swap.inputAmount.amount}`);
-        // // If there's an open order with this member, we skip and choose the next best member
-        // // @todo we should also check if the order is still valid?
-        // // @todo we need to pick the next best members
-        // if (openOrders.some(order => order.sellToken === member.token_address)) {
-        //     console.log(`Skipping member ${member.address} as there is already an open order with them`);
-        //     continue;
-        // }
+
+        // 3. Once the swap is clear, we optimise the resources: Overall we try to keep our cards open: We mint/redeem as much as we require
+        let targetAmount = swap.inputAmount.amount;
+
+        if (direction === ArbDirection.GROUP_MINT) {
+            // if the direction is groupMint and we have less groupTokens than the targetAmount, we mint more group tokens
+            const currentGroupBalance = await getBotErc1155Balance(groupAddress);
+            const outstandingAmount = Number(targetAmount) - currentGroupBalance;
+            if (currentGroupBalance < targetAmount) {
+                console.log("Minting group tokens...");
+                // @todo, limit the amount of group tokens we mint and also somehow decide whose member's group tokens we mint
+                await mintPossibleGroupTokens(groupAddress, membersCache, outstandingAmount);
+            }
+        }
+        else if (direction === ArbDirection.REDEEM) {
+            // if the direciton is redeem and we have less member Circles than the target amount, we try to redeem the remaining amount
+            const currentMemberBalance = await getBotErc20Balance(member.token_address);
+            let oustandingAmount = targetAmount - currentMemberBalance;
+            if (oustandingAmount > 0) {
+                console.log("Redeeming group tokens...");
+                await redeemGroupTokens(oustandingAmount, member);
+            }
+        }
+            
+
+        console.log("Minting group tokens...");
+        // await mintPossibleGroupTokens(groupAddress, membersCache);
 
         // 4. Calculate investing amount
         let currentBotGroupBalance = await getBotErc20Balance(groupTokenAddress);
