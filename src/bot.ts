@@ -463,6 +463,8 @@ async function placeOrder(maxSellAmount: bigint, member: GroupMember, direction:
         receiver: botAddress, // Tokens will be sent back to the same address
     };
 
+    console.log("Order details:", order);
+
     console.log("Signing the order...");
     const { signature, signingScheme } = await OrderSigningUtils.signOrder(order, cowswapChainId, wallet);
 
@@ -523,7 +525,7 @@ async function main() {
 
         const { member, direction, suggestedAmount } = nextPick;
 
-        console.log(`Picked member ${member.address} for ${direction} arbitrage`);
+        console.log(`Picked member ${member.address} for ${direction} arbitrage and suggested amount of ${suggestedAmount}`);
         // // If there's an open order with this member, we skip and choose the next best member
         // // @todo we should also check if the order is still valid?
         // // @todo we need to pick the next best members
