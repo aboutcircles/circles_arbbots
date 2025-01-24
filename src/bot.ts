@@ -158,7 +158,7 @@ async function checkAllowance(owner: string, spender: string, tokenAddress: stri
 
 
 // Fetch the latest price for an individual token (in units of the group token)
-async function fetchBalancerQuote(tokenAddress: string): Promise<Swap | null> {
+async function fetchBalancerQuote(tokenAddress: string, groupTomember: boolean = true): Promise<Swap | null> {
 
     const memberToken = new Token(
         chainId,
@@ -167,13 +167,16 @@ async function fetchBalancerQuote(tokenAddress: string): Promise<Swap | null> {
         "Member Token"
     );
 
+    const inToken = groupTomember ? balancerGroupToken : memberToken;
+    const outToken = groupTomember ? memberToken : balancerGroupToken;
+
     const swapKind = SwapKind.GivenOut;
     const pathInput = {
         chainId,
-        tokenIn: balancerGroupToken.address,
-        tokenOut: memberToken.address,
+        tokenIn: inToken.address,
+        tokenOut: outToken.address,
         swapKind: swapKind,
-        swapAmount: TokenAmount.fromHumanAmount(memberToken, "1.0")
+        swapAmount: TokenAmount.fromHumanAmount(outToken, "1.0")
     }
     const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
     // if there is no path, we return null
@@ -349,6 +352,7 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
     // return { member: pickedMember, direction: direction, suggestedAmount: 0n };
 
     // we filterout the members with open orders
+    // @todo: If we don't use cowswap, then there would be no need to filter out members with open orders
     let members = membersCache.members.filter((member) => !openOrders.some(order => order.sellToken === member.token_address));
 
     //if there are no members left, we return null
@@ -358,9 +362,10 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
     }
 
     // Randomly select members for now
-    let highestProfit = 0n;
-    let best_member = members[0];
+    let highestLogProfit = 0n;
+    let best_member: GroupMember;
     let best_swap: Swap;
+    let best_direction: ArbDirection;
 
     // we take a number of samples and then pick the best one that doesn't already have an open order
     let NSamples = 10;
@@ -368,28 +373,44 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
     for (let i = 0; i < NSamples; i++) {
         // random member
         let member = membersCache.members[Math.floor(Math.random() * membersCache.members.length)];
+    
 
-        // for now we only go the simple arbitrage route
-        let direction = ArbDirection.GROUP_MINT;
         // we check at what price we can get a member token
         let swap = await fetchBalancerQuote(member.token_address);
+        let direction = ArbDirection.GROUP_MINT;
         if (swap === null) {
             continue;
         }
-        let expectedProfit = BigInt(10**18) - swap.inputAmount.amount;
-        if (expectedProfit > highestProfit) {
-            highestProfit = expectedProfit;
+        // depending on the sign of the swao, we calculate the expected profit
+        if (swap.inputAmount.amount > BigInt(10**18)) {
+            // in this case the the member token is more valuable than the group token
+            // in this case we would sell the member token for group tokens and redeem the group tokens
+            // we want to estimate the profit of a deal in which we purchase one group token. 
+            // for sake of simplicity, we actually query the swap again in the opposite direction.
+            swap = await fetchBalancerQuote(member.token_address, false);
+            // we need to estimate the amount of member token that we'd need 
+            
+            if (swap === null) {
+                continue;
+            }
+            direction = ArbDirection.REDEEM;
+        }    
+
+        const expectedProfit = BigInt(10**18) - swap.inputAmount.amount;
+        if (expectedProfit > highestLogProfit) {
+            highestLogProfit = expectedProfit;
             best_member = member;
             best_swap = swap;
+            best_direction = direction
         }
     }
 
-    if (highestProfit <= 0n) {
+    if (highestLogProfit <= 0n) {
         console.log("No profitable trades found");
         return null
     }   
 
-    return { member: best_member, direction: ArbDirection.GROUP_MINT, swap: best_swap!};
+    return { member: best_member!, direction: best_direction!, swap: best_swap!};
 
 }
 
@@ -463,6 +484,51 @@ async function placeOrder(maxSellAmount: bigint, member: GroupMember, direction:
     }
 }
 
+async function swapUsingBalancer(tokenAddress: string, swap: Swap): Promise<ethers.providers.TransactionReceipt> {
+    console.log(
+        `Input token: ${swap.inputAmount.token.address}, Amount: ${swap.inputAmount.amount}`
+    );
+    console.log(
+        `Output token: ${swap.outputAmount.token.address}, Amount: ${swap.outputAmount.amount}`
+    );
+
+    // Get up to date swap result by querying onchain
+    const updated = await swap.query(rpcUrl) as ExactInQueryOutput;
+    console.log(`Updated amount: ${updated.expectedAmountOut}`);
+
+    const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
+    const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
+    const slippage = Slippage.fromPercentage("0.1"); // 0.1%
+    
+
+    let buildInput: SwapBuildCallInput;
+    
+    buildInput = {
+        slippage,
+        deadline,
+        queryOutput: updated,
+        wethIsEth,
+        sender: botAddress as `0x${string}`,
+        recipient: botAddress as `0x${string}`,
+    };
+    
+    const callData = swap.buildCall(buildInput) as SwapBuildOutputExactIn;
+
+    console.log("Swap call data:", callData);
+
+    const groupTokenContract = new ethers.Contract(balancerGroupToken.address, erc20Abi, wallet);
+    const approveTx = await groupTokenContract.approve(vaultAddress, swap.inputAmount.amount);
+    await approveTx.wait();
+
+    const txResponse = await wallet.sendTransaction({to: callData.to, data: callData.callData});
+      
+    const txReceipt = await txResponse.wait();
+    console.log("Swap executed in tx:", txReceipt.transactionHash);
+
+    return txReceipt;
+
+}
+
 // Main function
 async function main() {
     await walletV6.init();
@@ -471,8 +537,7 @@ async function main() {
 
     const membersCache = await initializeMembersCache();
 
-    let run_while_loop = true;
-    while (run_while_loop) {
+    while (true) {
         await new Promise((resolve) => setTimeout(resolve, waitingTime));
 
         // 1. Update open orders
@@ -551,7 +616,8 @@ async function main() {
             continue;
         }
 
-        const balancerTradeRecept = await swapUsingBalancer(member.token_address, swap, direction);
+        // @Todo: Right now we simply consume the swap, but actually the swap needs to be updated based on the whether we successfully redeemd/minted etc! Not a great solution.
+        const balancerTradeRecept = await swapUsingBalancer(member.token_address, swap);
 
         // 6. Place order
         // placeOrder(
@@ -564,47 +630,4 @@ async function main() {
 
 main().catch(console.error);
 
-async function swapUsingBalancer(tokenAddress: string, swap: Swap, direction: ArbDirection): Promise<ethers.providers.TransactionReceipt> {
-    console.log(
-        `Input token: ${swap.inputAmount.token.address}, Amount: ${swap.inputAmount.amount}`
-    );
-    console.log(
-        `Output token: ${swap.outputAmount.token.address}, Amount: ${swap.outputAmount.amount}`
-    );
 
-    // Get up to date swap result by querying onchain
-    const updated = await swap.query(rpcUrl) as ExactInQueryOutput;
-    console.log(`Updated amount: ${updated.expectedAmountOut}`);
-
-    const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
-    const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
-    const slippage = Slippage.fromPercentage("0.1"); // 0.1%
-    
-
-    let buildInput: SwapBuildCallInput;
-    
-    buildInput = {
-        slippage,
-        deadline,
-        queryOutput: updated,
-        wethIsEth,
-        sender: botAddress as `0x${string}`,
-        recipient: botAddress as `0x${string}`,
-    };
-    
-    const callData = swap.buildCall(buildInput) as SwapBuildOutputExactIn;
-
-    console.log("Swap call data:", callData);
-
-    const groupTokenContract = new ethers.Contract(balancerGroupToken.address, erc20Abi, wallet);
-    const approveTx = await groupTokenContract.approve(vaultAddress, swap.inputAmount.amount);
-    await approveTx.wait();
-
-    const txResponse = await wallet.sendTransaction({to: callData.to, data: callData.callData});
-      
-    const txReceipt = await txResponse.wait();
-    console.log("Swap executed in tx:", txReceipt.transactionHash);
-
-    return txReceipt;
-
-}
