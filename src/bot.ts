@@ -47,7 +47,8 @@ import {
     erc20Abi,
     hubV2Abi,
     superGroupOperatorAbi,
-    tokenWrapperAbi
+    tokenWrapperAbi,
+    liftErc20Abi
 } from "./abi/index.js";
 
 // Algorithm parameters
@@ -276,7 +277,7 @@ async function mintPossibleGroupTokens(group: string, membersCache: MembersCache
 
     // Some logic to order the members by increasing value and then mint group tokens starting with the least valuable tokens until we reach the threshold
     // Attention: Need to take care of the case where the have tokens for which we don't yet have a price => in this case we should fetch the price
-    //@todo: needs to be implemented
+    // @todo needs to be implemented
 
     // unwrap wrapped personal tokens to mint as a group token later
     const unwrapQueue = filteredTokens.map(async (token) => {
@@ -291,6 +292,40 @@ async function mintPossibleGroupTokens(group: string, membersCache: MembersCache
     await Promise.all(unwrapQueue);
 
     await mintGroupTokensFromIndividualTokens(filteredTokens);
+}
+
+async function theoreticallyAvailableCRC(avatar: string): Promise<bigint> {
+    // check if it's a group or member
+    let mintableBalance = await botAvatar.getMintableAmount();
+    mintableBalance = ethers.utils.parseEther(mintableBalance.toString()).toBigInt();
+    let currentBalance = await botAvatar.getTotalBalance();
+    currentBalance = ethers.utils.parseEther(currentBalance.toString()).toBigInt();
+
+    //@todo not all tokens might be from group members
+    if(avatar == groupAddress) {
+        return currentBalance + mintableBalance;
+    } else {
+        const liftErc20Contract = new Contract("0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5", liftErc20Abi, wallet);
+
+        const erc20Representation = await liftErc20Contract.erc20Circles(1, avatar);
+        // erc1155 tokens
+        const botBalanceErc1155 = await hubV2Contract.balanceOf(groupAddress, ethers.BigNumber.from(avatar));
+        // erc20 tokens
+        const botBalanceErc20 = await getBotErc20Balance(erc20Representation);
+        
+        const maxVaultRedeemableAmount = await getMaxRedeemableAmount(avatar);
+
+        // Calculate net mintable
+        const netMintable = mintableBalance + currentBalance - BigInt(botBalanceErc1155) - botBalanceErc20;
+
+        // Compare and return the appropriate amount
+        if (maxVaultRedeemableAmount > netMintable) {
+            // effectively mintableBalance + currentBalance
+            return mintableBalance + currentBalance;
+        } else {
+            return BigInt(botBalanceErc1155) + botBalanceErc20 + maxVaultRedeemableAmount;
+        }
+    }
 }
 
 async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow[]) {
