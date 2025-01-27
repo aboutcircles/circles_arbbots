@@ -260,7 +260,7 @@ async function getOpenOrders(): Promise<EnrichedOrder[]> {
     return orders.filter((order) => order.status === OrderStatus.OPEN);
 }
 
-async function mintPossibleGroupTokens(group: string, membersCache: MembersCache, threshold: number) {
+async function mintPossibleGroupTokens(group: string, membersCache: MembersCache, threshold: bigint) {
     const botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(botAddress);
     // Filter tokens to keep tokens of gorup members only and apply some other filters
     const filteredTokens = botBalances.filter(token => {
@@ -580,7 +580,7 @@ async function main() {
         if (direction === ArbDirection.GROUP_MINT) {
             // if the direction is groupMint and we have less groupTokens than the targetAmount, we mint more group tokens
             const currentGroupBalance = await getBotErc1155Balance(groupAddress);
-            const outstandingAmount = Number(targetAmount) - currentGroupBalance;
+            const outstandingAmount = targetAmount - BigInt(currentGroupBalance);
             if (currentGroupBalance < targetAmount) {
                 console.log("Minting group tokens...");
                 // @todo, limit the amount of group tokens we mint and also somehow decide whose member's group tokens we mint
