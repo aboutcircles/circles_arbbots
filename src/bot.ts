@@ -43,8 +43,10 @@ import {
 
 // ABI
 import {
+    groupTreasuryAbi,
     erc20Abi,
-    erc1155Abi,
+    hubV2Abi,
+    superGroupOperatorAbi,
     tokenWrapperAbi
 } from "./abi/index.js";
 
@@ -73,6 +75,7 @@ const postgressqlHost = "144.76.163.174";
 const postgressqlPort = 5432;
 
 const groupAddress = process.env.TEST_GROUP_ADDRESS!;
+const groupOperatorAddress = process.env.TEST_GROUP_OPERATOR!;
 const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
 const CowSwapRelayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
 const tokenWrapperContractAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
@@ -87,6 +90,8 @@ const walletV6 = new PrivateKeyContractRunner(providerV6, botPrivateKey);
 const selectedCirclesConfig = circlesConfig[100];
 const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
 const circlesData = new CirclesData(circlesRPC);
+
+const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, wallet);
 
 let
     sdk: Sdk | null,
@@ -136,7 +141,7 @@ async function getLatestGroupMembers(since: bigint): Promise<GroupMember[]> {
 }
 
 async function updateGroupMemberTokenAddresses(members: GroupMember[]): Promise<GroupMember[]> {
-    const tokenWrapperContract = new ethers.Contract(tokenWrapperContractAddress, tokenWrapperAbi, wallet);
+    const tokenWrapperContract = new Contract(tokenWrapperContractAddress, tokenWrapperAbi, wallet);
     // we call the contract 1 by 1 for each address
     for (let i = 0; i < members.length; i++) {
         const member = members[i];
@@ -149,7 +154,7 @@ async function updateGroupMemberTokenAddresses(members: GroupMember[]): Promise<
 
 async function checkAllowance(owner: string, spender: string, tokenAddress: string): Promise<bigint> {
     // Create a contract instance for the token
-    const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
+    const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the allowance
     const allowance = await tokenContract.allowance(owner, spender);
@@ -233,18 +238,10 @@ async function initializeMembersCache(): Promise<MembersCache> {
     };
 }
 
-
-// helper function to redeem as many group tokens for the target member as possible. We return the amount of group tokens redeemed
-
-async function redeemGroupTokens(max_amount: bigint, target_member: GroupMember): Promise<bigint> {
-    // We redeem the group tokens. 
-    return 0n;
-}
-
 async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
     
     // Create a contract instance for the token
-    const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
+    const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the balance
     let balance = await tokenContract.balanceOf(botAddress);
@@ -252,11 +249,8 @@ async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
 }
 
 async function getBotErc1155Balance(tokenAddress: string): Promise<number> {
-    // Create a contract instance for the token
-    const tokenContract = new ethers.Contract(selectedCirclesConfig.v2HubAddress, erc1155Abi, provider);
-
     // Fetch the balance
-    const balance = await tokenContract.balanceOf(botAddress, ethers.BigNumber.from(tokenAddress));
+    const balance = await hubV2Contract.balanceOf(botAddress, ethers.BigNumber.from(tokenAddress));
     return balance.toBigInt();
 }
 
@@ -414,10 +408,30 @@ async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOr
 
 }
 
+async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
+    const groupTreasuryAddress = await hubV2Contract.treasuries(groupAddress);
+    const groupTreasuryContract = new Contract(groupTreasuryAddress, groupTreasuryAbi, provider);
+    const groupVaultAddress = await groupTreasuryContract.vaults(groupAddress);
+
+    const balance = await hubV2Contract.balanceOf(groupVaultAddress, ethers.BigNumber.from(memberAddress));
+    return balance.toBigInt();
+}
+
+async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): Promise<void> {
+    if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
+
+    let tx = await hubV2Contract.setApprovalForAll(groupOperatorAddress, true);
+    await tx.wait();
+    
+    const memberAddressesToBigNumber = memberAddresses.map(memberAddress => ethers.BigNumber.from(memberAddress))
+    const superGroupOperatorContract = new Contract(groupOperatorAddress, superGroupOperatorAbi, wallet);
+    tx = await superGroupOperatorContract.redeem(groupAddress, memberAddressesToBigNumber, amounts);
+    await tx.wait();
+}
+
 // Approve relayer to spend tokens
 async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     // This function approves the token over maximal amounts for now, since we consider the vaultRelayer to be trustworthy (in light of protection mechanisms on their part)
-
     const tokenContract = new Contract(tokenAddress, erc20Abi, wallet);
     const tx = await tokenContract.approve(CowSwapRelayerAddress,allowanceAmount);
     console.log('Approval transaction:', tx);
@@ -516,7 +530,7 @@ async function swapUsingBalancer(tokenAddress: string, swap: Swap): Promise<ethe
 
     console.log("Swap call data:", callData);
 
-    const groupTokenContract = new ethers.Contract(balancerGroupToken.address, erc20Abi, wallet);
+    const groupTokenContract = new Contract(balancerGroupToken.address, erc20Abi, wallet);
     const approveTx = await groupTokenContract.approve(vaultAddress, swap.inputAmount.amount);
     await approveTx.wait();
 
@@ -579,7 +593,7 @@ async function main() {
             let oustandingAmount = targetAmount - currentMemberBalance;
             if (oustandingAmount > 0) {
                 console.log("Redeeming group tokens...");
-                await redeemGroupTokens(oustandingAmount, member);
+                await redeemGroupTokens([member.address], [oustandingAmount]);
             }
         }
             
@@ -607,7 +621,7 @@ async function main() {
         if (direction === ArbDirection.REDEEM) {
             const collateralAmount = 0n // placeholder for now
             const targetRedeemAmount = collateralAmount < availableBalance ? collateralAmount : availableBalance;
-            const redeemAmount = await redeemGroupTokens(targetRedeemAmount, member);
+            const redeemAmount = await redeemGroupTokens([member.address], [targetRedeemAmount]);
             // investingAmount = redeemAmount;
         } 
         
