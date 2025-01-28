@@ -115,5 +115,34 @@ export const liftErc20Abi = [
         type: "function"
     }
 ];
-  
-  
+
+export const inflationaryTokenAbi = [
+    {
+        constant: true,
+        inputs: [],
+        name: "avatar",
+        outputs: [
+            { name: "", type: "address"}
+        ],
+        payable: false,
+        stateMutability: "view",
+        type: "function"
+    }
+];
+
+export const inflationaryCirclesOperatorAbi = [
+    {
+    constant: true,
+    inputs: [
+        { name: "_account", type: "address" },
+        { name: "_id", type: "uint256" }
+    ],
+    name: "inflationaryBalanceOf",
+    outputs: [
+        { name: "", type: "uint256" }
+    ],
+    payable: false,
+    stateMutability: "view",
+    type: "function"
+    }
+];  

@@ -1,10 +1,12 @@
 import { Swap } from "@balancer/sdk";
+import { TokenBalanceRow } from '@circles-sdk/data';
 
 
 export interface Bot {
-    balance: number;
+    balances: TokenBalanceRow[];
     address: string;
-    groupTokens: number;
+    groupAddress: string;
+    groupTokenAddress: string;
 }
 
 export interface GroupMember {
@@ -19,6 +21,14 @@ export interface MembersCache {
     members: GroupMember[];
 }
 
+export interface Deal {
+    isExecutable?: boolean;
+    tokenIn: string;
+    tokenOut: string;
+    amountOut: bigint;
+    swapData: Swap | null;
+}
+
 export enum ArbDirection {
     REDEEM = "REDEEM",
     GROUP_MINT = "GROUP_MINT",
@@ -31,3 +41,4 @@ export type PlaceOrderResult =
 export type NextPick = 
     | { member: GroupMember, direction: ArbDirection , swap: Swap }
     | null;
+

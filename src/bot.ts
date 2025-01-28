@@ -35,6 +35,7 @@ const { Client } = pg;
 import {
     ArbDirection,
     Bot,
+    Deal,
     GroupMember,
     MembersCache,
     PlaceOrderResult,
@@ -48,7 +49,8 @@ import {
     hubV2Abi,
     superGroupOperatorAbi,
     tokenWrapperAbi,
-    liftErc20Abi
+    liftErc20Abi,
+    inflationaryTokenAbi
 } from "./abi/index.js";
 
 // Algorithm parameters
@@ -59,6 +61,7 @@ const waitingTime: number = 1000; // 1 second
 const bufferFraction: number = 0.95;
 const maxOpenOrders: number = 10; // added to avoid spamming cowswap with orders
 const ratioCutoff: number = 0.1 // this value determines at which point we consider prices to have equilibrated.
+const EPSILON = BigInt(1e14);
 
 // constants 
 const cowswapChainId = SupportedChainId.GNOSIS_CHAIN
@@ -91,6 +94,7 @@ const walletV6 = new PrivateKeyContractRunner(providerV6, botPrivateKey);
 const selectedCirclesConfig = circlesConfig[100];
 const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
 const circlesData = new CirclesData(circlesRPC);
+console.log(selectedCirclesConfig)
 
 const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, wallet);
 
@@ -164,7 +168,7 @@ async function checkAllowance(owner: string, spender: string, tokenAddress: stri
 
 
 // Fetch the latest price for an individual token (in units of the group token)
-async function fetchBalancerQuote(tokenAddress: string, groupTomember: boolean = true): Promise<Swap | null> {
+async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean = true): Promise<Swap | null> {
 
     const memberToken = new Token(
         chainId,
@@ -173,8 +177,8 @@ async function fetchBalancerQuote(tokenAddress: string, groupTomember: boolean =
         "Member Token"
     );
 
-    const inToken = groupTomember ? balancerGroupToken : memberToken;
-    const outToken = groupTomember ? memberToken : balancerGroupToken;
+    const inToken = groupToMember ? balancerGroupToken : memberToken;
+    const outToken = groupToMember ? memberToken : balancerGroupToken;
 
     const swapKind = SwapKind.GivenOut;
     const pathInput = {
@@ -186,6 +190,7 @@ async function fetchBalancerQuote(tokenAddress: string, groupTomember: boolean =
     }
     const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
     // if there is no path, we return null
+    console.log(sorPaths.length);
     if (sorPaths.length === 0) {
         return null;
     }
@@ -194,7 +199,7 @@ async function fetchBalancerQuote(tokenAddress: string, groupTomember: boolean =
     const swap = new Swap({
         chainId,
         paths: sorPaths,
-        swapKind,
+        swapKind
     });
 
     return swap
@@ -212,7 +217,7 @@ async function checkLatestPrices(members: GroupMember[]): Promise<GroupMember[]>
     return members;
 }
 
-// TODO: At some point this needs to be updated to some subset of new members, etc. 
+// @todo At some point this needs to be updated to some subset of new members, etc. 
 async function initializeMembersCache(): Promise<MembersCache> {
     console.log("Initializing members cache...");
 
@@ -220,13 +225,6 @@ async function initializeMembersCache(): Promise<MembersCache> {
     console.log("Fetching latest members...");
     const earlyNumber: number = 0;
     let members = await getLatestGroupMembers(BigInt(earlyNumber));
-
-    // We fetch the token addresses for the members
-    console.log("Fetching token addresses...");
-    members = await updateGroupMemberTokenAddresses(members);
-
-    // We filter members without wrapped tokens
-    members = members.filter((member) => member.token_address !== ethers.constants.AddressZero);
 
     // We fetch the latest price for the members
     // console.log("Fetching latest prices...");
@@ -249,16 +247,10 @@ async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
     return balance.toBigInt();
 }
 
-async function getBotErc1155Balance(tokenAddress: string): Promise<number> {
+async function getBotErc1155Balance(tokenAddress: string): Promise<bigint> {
     // Fetch the balance
     const balance = await hubV2Contract.balanceOf(botAddress, ethers.BigNumber.from(tokenAddress));
     return balance.toBigInt();
-}
-
-async function getOpenOrders(): Promise<EnrichedOrder[]> {
-    // We fetch open orders using the CowSwap Orderbook API
-    let orders: EnrichedOrder[] = await orderBookApi.getOrders({ owner: botAddress });
-    return orders.filter((order) => order.status === OrderStatus.OPEN);
 }
 
 async function mintPossibleGroupTokens(group: string, membersCache: MembersCache, threshold: bigint) {
@@ -348,101 +340,6 @@ async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow
     await botAvatar.wrapInflationErc20(groupAddress, totalGroupTokensBalance);
 }
 
-
-async function pickNextMember(membersCache: MembersCache, openOrders: EnrichedOrder[]): Promise<NextPick> {
-    // Logic to pick next members using exploration/exploitation trade-off
-
-    // // In a first step we filter out members without a price
-    // let members = membersCache.members.filter((member) => member.latest_price !== null);
-    // if (members.length === 0) {
-    //     console.log("No members with a price found");
-    //     return null;
-    // }    
-
-    // // For now we use a dummy logic: we pick the member whose token's price is the farthest away from 1. If that is within the cutoff, we do nothing.
-    
-    // // some helpfer functions to let us calculate the ratio of a bigint
-    // function log10(bigint:bigint) {
-    //     if (bigint < 0) return NaN;
-    //     const s = bigint.toString(10);
-    //     return s.length + Math.log10(parseFloat("0." + s.substring(0, 15)))
-    //   }
-
-    // let logdiff = (a: bigint) => Number(Math.abs(log10(a) - 18));
-    
-    // // we sort the members by the highest abs diff function evaluated on the latest value
-    // let sortedMembers = members.sort((a, b) => logdiff(b.latest_price!) - logdiff(a.latest_price!));
-    // // we take the first and last member as candidates
-    // let pickedMember = sortedMembers[0];
-    // if (logdiff(pickedMember.latest_price!) < ratioCutoff) {
-    //     return null;
-    // }
-    // let direction = log10(pickedMember.latest_price!) > 18 ? ArbDirection.REDEEM : ArbDirection.GROUP_MINT;
-    // return { member: pickedMember, direction: direction, suggestedAmount: 0n };
-
-    // we filterout the members with open orders
-    // @todo: If we don't use cowswap, then there would be no need to filter out members with open orders
-    let members = membersCache.members.filter((member) => !openOrders.some(order => order.sellToken === member.token_address));
-
-    //if there are no members left, we return null
-    if (members.length === 0) {
-        console.log("No members without open orders found");
-        return null;
-    }
-
-    // Randomly select members for now
-    let highestLogProfit = 0n;
-    let best_member: GroupMember;
-    let best_swap: Swap;
-    let best_direction: ArbDirection;
-
-    // we take a number of samples and then pick the best one that doesn't already have an open order
-    let NSamples = 10;
-
-    for (let i = 0; i < NSamples; i++) {
-        // random member
-        let member = membersCache.members[Math.floor(Math.random() * membersCache.members.length)];
-    
-
-        // we check at what price we can get a member token
-        let swap = await fetchBalancerQuote(member.token_address);
-        let direction = ArbDirection.GROUP_MINT;
-        if (swap === null) {
-            continue;
-        }
-        // depending on the sign of the swao, we calculate the expected profit
-        if (swap.inputAmount.amount > BigInt(10**18)) {
-            // in this case the the member token is more valuable than the group token
-            // in this case we would sell the member token for group tokens and redeem the group tokens
-            // we want to estimate the profit of a deal in which we purchase one group token. 
-            // for sake of simplicity, we actually query the swap again in the opposite direction.
-            swap = await fetchBalancerQuote(member.token_address, false);
-            // we need to estimate the amount of member token that we'd need 
-            
-            if (swap === null) {
-                continue;
-            }
-            direction = ArbDirection.REDEEM;
-        }    
-
-        const expectedProfit = BigInt(10**18) - swap.inputAmount.amount;
-        if (expectedProfit > highestLogProfit) {
-            highestLogProfit = expectedProfit;
-            best_member = member;
-            best_swap = swap;
-            best_direction = direction
-        }
-    }
-
-    if (highestLogProfit <= 0n) {
-        console.log("No profitable trades found");
-        return null
-    }   
-
-    return { member: best_member!, direction: best_direction!, swap: best_swap!};
-
-}
-
 async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
     const groupTreasuryAddress = await hubV2Contract.treasuries(groupAddress);
     const groupTreasuryContract = new Contract(groupTreasuryAddress, groupTreasuryAbi, provider);
@@ -472,68 +369,9 @@ async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     console.log('Approval transaction:', tx);
     await tx.wait();
     console.log('Approval transaction confirmed');
-  }
-
-async function placeOrder(maxSellAmount: bigint, member: GroupMember, direction: ArbDirection): Promise<PlaceOrderResult> {
-    // This wrapper places a partially fillable limit order that sells up to [maxSellAmount] of the inToken at a price of [limit] each. 
-    // If [direction] is ArbDirection.TO_GROUP, the bot sells member tokens for group tokens. If [direction] is ArbDirection.FROM_GROUP, the bot sells group tokens for member tokens.
-    // The function also takes care of the approval with the cowswap vaultrelayer and signing of the order.
-
-    // Approve the relayer to spend the token fi required
-    const current_allowance = await checkAllowance(botAddress, CowSwapRelayerAddress, member.token_address);
-    if (current_allowance < maxSellAmount) {
-        // @todo approve only the outstanding amount
-        console.log("Approving the relayer to spend the token...");
-        await approveTokenWithRelayer(member.token_address);
-    }
-
-    const sellToken = direction === ArbDirection.REDEEM ? member.token_address : groupTokenAddress;
-    const buyToken = direction === ArbDirection.REDEEM ? groupTokenAddress : member.token_address;
-
-    // const maxBuyAmount = maxSellAmount * (profitThresholdScale - profitThreshold) / profitThresholdScale;
-
-    // Define the order
-    const order: UnsignedOrder = {
-        sellToken: sellToken,
-        buyToken: buyToken,
-        sellAmount: maxSellAmount.toString(),
-        buyAmount: BigInt(10**18).toString(),//maxBuyAmount.toString(),
-        validTo: Math.floor(Date.now()/1000) + validityCutoff, // Order valid for 1 hour
-        appData: "0xb48d38f93eaa084033fc5970bf96e559c33c4cdc07d889ab00b4d63f9590739d", // Taken via instructions from API Schema
-        feeAmount: "0", // Adjust if necessary
-        partiallyFillable: true,
-        kind: OrderKind.SELL, // "sell" means you're selling tokenIn for tokenOut
-        receiver: botAddress, // Tokens will be sent back to the same address
-    };
-
-    console.log("Order details:", order);
-
-    console.log("Signing the order...");
-    const { signature, signingScheme } = await OrderSigningUtils.signOrder(order, cowswapChainId, wallet);
-
-    console.log("Submitting the order to CoW Protocol...");
-    try {
-        const orderId = await orderBookApi.sendOrder({
-            ...order,
-            signature,
-            from: botAddress,
-            appData: "{}",
-            signingScheme: signingScheme as unknown as SigningScheme
-        });
-        console.log(`Order successfully submitted! Order ID: ${orderId}`);
-        return {success: true, orderId: orderId};
-
-    } catch (error) {
-        console.error("Failed to submit the order:", error);
-        let errorMessage = "Unknown error";
-        if (error instanceof Error) {
-            errorMessage = error.message;
-        }
-        return { success: false, error: errorMessage };
-    }
 }
 
-async function swapUsingBalancer(tokenAddress: string, swap: Swap): Promise<ethers.providers.TransactionReceipt> {
+async function swapUsingBalancer(swap: Swap): Promise<ethers.providers.TransactionReceipt> {
     console.log(
         `Input token: ${swap.inputAmount.token.address}, Amount: ${swap.inputAmount.amount}`
     );
@@ -563,7 +401,7 @@ async function swapUsingBalancer(tokenAddress: string, swap: Swap): Promise<ethe
     
     const callData = swap.buildCall(buildInput) as SwapBuildOutputExactIn;
 
-    console.log("Swap call data:", callData);
+    //console.log("Swap call data:", callData);
 
     const groupTokenContract = new Contract(balancerGroupToken.address, erc20Abi, wallet);
     const approveTx = await groupTokenContract.approve(vaultAddress, swap.inputAmount.amount);
@@ -578,103 +416,196 @@ async function swapUsingBalancer(tokenAddress: string, swap: Swap): Promise<ethe
 
 }
 
+async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
+    console.log(`Updating member ${member.address}`);
+    const tokenWrapperContract = new Contract(tokenWrapperContractAddress, tokenWrapperAbi, wallet);
+    // we call the contract 1 by 1 for each address
+    
+    if(member.token_address === ethers.constants.AddressZero || member.token_address === undefined) {
+        const tokenAddress = await tokenWrapperContract.erc20Circles(DemurragedVSInflation, member.address);
+        member.token_address = tokenAddress;
+    }
+
+    if(member.token_address !== ethers.constants.AddressZero && member.token_address !== undefined) {
+        console.log(member.token_address)
+        const quote = await fetchBalancerQuote(member.token_address);
+        console.log(quote);
+        if(quote) member.latest_price = quote!.inputAmount.amount;
+        else member.latest_price = BigInt(0);
+        member.last_price_update = Date.now();
+    }
+
+    return member;
+}
+
+async function pickDeal(member: GroupMember): Promise<Deal> {
+    console.log(`pickDeal check stated`)
+    let isDeal = true;
+    let tokenIn = groupTokenAddress;
+    let tokenOut = member.token_address;
+    let amountIn = member.latest_price ?? BigInt(0);
+    let swapData = null;
+    const amountOut = BigInt(1e18);
+  
+    // If there's no price yet or if it's definitely higher than 1e18
+    if (amountIn === BigInt(0) || amountIn > BigInt(1e18) + EPSILON) {
+        swapData = await fetchBalancerQuote(member.token_address, false);
+        amountIn = swapData?.inputAmount.amount ?? BigInt(0);
+
+        // If the updated quote also exceeds 1e18
+        if (amountIn > BigInt(1e18) + EPSILON) {
+            tokenIn = member.token_address;
+            tokenOut = groupTokenAddress;
+        }
+    } 
+    // If it's definitely lower than 1e18
+    else if (amountIn < BigInt(1e18) - EPSILON) {
+        // we jsut move forward
+        swapData = await fetchBalancerQuote(member.token_address);
+        
+    } 
+    // Otherwise, it's within the epsilon range of 1e18
+    else {
+        isDeal = false;
+    }
+
+    // @todo check if enough CRC
+  
+    return {
+        isExecutable: isDeal,
+        tokenIn,
+        tokenOut,
+        amountOut,
+        swapData
+    };
+}
+
+// return true if tokens are converted successfully, or there is enough tokens on the contract
+// return false if it it impossible to get these tokens
+function sumBalance(balances: TokenBalanceRow[]): bigint {
+    return balances.reduce((sum, entry) => {
+        return sum + BigInt(entry.staticAttoCircles);
+    }, BigInt(0));
+}
+
+// @dev `tokenAmount` in static CRC
+// @todo fix conversion form static to inflationary
+async function requireTokens(tokenAddress: string, tokenAmount: bigint, balances: TokenBalanceRow[]): Promise<boolean> {
+    const initialTokenBalance = await getBotErc20Balance(tokenAddress);
+
+    // @todo check compatibility between erc1155 and inflationary amount
+    if(initialTokenBalance >= tokenAmount) return true;
+    else {
+        const lackingAmount = tokenAmount - initialTokenBalance;
+        console.log(`Lack some tokens: ${lackingAmount}`);
+        // wrapped erc20
+        const tokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
+        const avatar = await tokenContract.avatar();
+
+        const tokensToWrapBalance = await getBotErc1155Balance(avatar);
+        //convertDemurrageToInflationaryValue()
+        if(tokensToWrapBalance < lackingAmount){
+            console.log(`Some tokens would be missing after wrapping ${lackingAmount - tokensToWrapBalance}`);
+            const tokensToMint = lackingAmount - tokensToWrapBalance;
+
+            if(tokenAddress == groupTokenAddress) {
+                // sumup members tokens without group tokens
+                const membersTokens = balances.filter(balance => balance.tokenOwner != groupAddress);
+                const additionalMintableGroupTokens = sumBalance(membersTokens);
+
+                console.log(`Additional mintable group tokens amount ${additionalMintableGroupTokens}`);
+                if(additionalMintableGroupTokens < tokensToMint) return false;
+                else {
+                    // @todo some member tokens needs unwrapping before mint
+                    // @todo mint tokensToMint precisely
+                    return true;
+                }
+            } else {
+                const maxRedeemableTokensAmount = await getMaxRedeemableAmount(avatar);
+                const filteredBalance = balances.filter(balance => balance.tokenOwner != avatar);
+                const additionalMintableMemberTokens = sumBalance(filteredBalance);
+                // and if we have enough tokens (group tokens + members toekns) to redeem that amount
+                if(
+                    additionalMintableMemberTokens >= tokensToMint
+                    && maxRedeemableTokensAmount >= tokensToMint
+                ) {
+                    console.log(`We might redeem tokens ${tokensToMint}`)
+
+                    // @todo check if group tokens + other member tokens are enough to redeem
+                    return true;
+                } else {
+                    console.log(`We can't redeem tokens. Tokens to mint ${tokensToMint}, additional mintable amount ${additionalMintableMemberTokens}, MaxRedeemableAmount ${maxRedeemableTokensAmount}`);
+                    return false
+                }
+            }
+            // @todo get max possible amount;
+
+            // @todo wrap the minted group or personal tokens
+            // @todo finish
+        } else {
+            // @todo wrap `tokensToWrapBalance` erc1155
+            return true;
+        }
+        // has erc1155
+        // might get throw the group
+        // may not get from group
+    }
+}
+
+async function execDeal(deal: Deal): Promise<void> {
+    // @todo check the current balance
+    console.log(`Executing deal tokenIn: ${deal.tokenIn}, tokenOut: ${deal.tokenOut}`);
+    if(deal.swapData) await swapUsingBalancer(deal.swapData);
+}
 // Main function
+
+async function getBotBalances(members: GroupMember[]): Promise<TokenBalanceRow[]> {
+    let botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(botAddress);
+    // @todo filter version 2 tokens
+    let memberAddresses = new Set(members.map(m => m.address.toLowerCase()));
+    memberAddresses.add(groupAddress);
+
+    const filteredBalances = botBalances.filter(balance =>
+        memberAddresses.has(balance.tokenOwner.toLowerCase())
+    );
+      
+    return filteredBalances;
+}
+
 async function main() {
     await walletV6.init();
     sdk = new Sdk(walletV6, selectedCirclesConfig);
     botAvatar = await sdk.getAvatar(botAddress);
 
     const membersCache = await initializeMembersCache();
+    let botBalances = await getBotBalances(membersCache.members); // @todo consider updating the balance after swap
+    /*
+    const possibleToGet = await requireTokens(
+        "0x159e6881e6ec370b46f2fe9fe75cbdfd8f7877b4",
+        BigInt(160e18),
+        botBalances
+    );
+    console.log(`Is possible to get ${possibleToGet}`);
+    */
+    while(true) {
+        console.log("Loop iteration start");
 
-    while (true) {
-        await new Promise((resolve) => setTimeout(resolve, waitingTime));
+        for(let i = 0; i < membersCache.members.length; i++) {
+            const newMemberState = await updateMemberCache(membersCache.members[i]);
 
-        // 1. Update open orders
-        console.log("Fetching open orders...");
-        const openOrders = await getOpenOrders()
-
-        if (openOrders.length >= maxOpenOrders) {
-            continue;
-        }
-
-        // 2. Decide next swap
-        console.log("Picking next members...");
-        const nextPick = await pickNextMember(membersCache, openOrders);
-
-        if (nextPick === null) {
-            continue;
-        }
-
-        const { member, direction, swap } = nextPick;
-
-        console.log(`Picked member ${member.address} for ${direction} arbitrage and suggested amount of ${swap.inputAmount.amount}`);
-
-        // 3. Once the swap is clear, we optimise the resources: Overall we try to keep our cards open: We mint/redeem as much as we require
-        let targetAmount = swap.inputAmount.amount;
-
-        if (direction === ArbDirection.GROUP_MINT) {
-            // if the direction is groupMint and we have less groupTokens than the targetAmount, we mint more group tokens
-            const currentGroupBalance = await getBotErc1155Balance(groupAddress);
-            const outstandingAmount = targetAmount - BigInt(currentGroupBalance);
-            if (currentGroupBalance < targetAmount) {
-                console.log("Minting group tokens...");
-                // @todo, limit the amount of group tokens we mint and also somehow decide whose member's group tokens we mint
-                await mintPossibleGroupTokens(groupAddress, membersCache, outstandingAmount);
+            if (newMemberState.latest_price) {
+                const deal = await pickDeal(newMemberState);
+                // @todo check if we have enough tokens
+                if(deal) {
+                    await execDeal(deal);
+                }
             }
+
+            membersCache.members[i] = newMemberState;
         }
-        else if (direction === ArbDirection.REDEEM) {
-            // if the direciton is redeem and we have less member Circles than the target amount, we try to redeem the remaining amount
-            const currentMemberBalance = await getBotErc20Balance(member.token_address);
-            let oustandingAmount = targetAmount - currentMemberBalance;
-            if (oustandingAmount > 0) {
-                console.log("Redeeming group tokens...");
-                await redeemGroupTokens([member.address], [oustandingAmount]);
-            }
-        }
-            
-
-        console.log("Minting group tokens...");
-        // await mintPossibleGroupTokens(groupAddress, membersCache);
-
-        // 4. Calculate investing amount
-        let currentBotGroupBalance = await getBotErc20Balance(groupTokenAddress);
-
-        // retrieve the total open amount from the orders
-        const openOrderAmount = openOrders.reduce((acc, order) => {
-            return order.sellToken === groupTokenAddress ? acc + BigInt(order.sellAmount) : acc;
-        }, 0n);
-        let availableBalance = currentBotGroupBalance - openOrderAmount;
-        if (availableBalance <= 0) {
-            console.log(`Skipping order placement as there is no available balance not already commited to an open order`);
-            continue;
-        }
-        
-        // @todo one unaddressed problem is that the amount should also be a function of the current ratio: The closer to 1, the less we should invest due to slippage?
-        let investingAmount = swap.inputAmount.amount//suggestedAmount < availableBalance ? suggestedAmount : availableBalance;
-
-        // 5. Redeem group tokens if necessary
-        if (direction === ArbDirection.REDEEM) {
-            const collateralAmount = 0n // placeholder for now
-            const targetRedeemAmount = collateralAmount < availableBalance ? collateralAmount : availableBalance;
-            const redeemAmount = await redeemGroupTokens([member.address], [targetRedeemAmount]);
-            // investingAmount = redeemAmount;
-        } 
-        
-        if (investingAmount <= 0) {
-            console.log(`Skipping order placement as either there is no assets to invest or the price impact is too high.`);
-            continue;
-        }
-
-        // @Todo: Right now we simply consume the swap, but actually the swap needs to be updated based on the whether we successfully redeemd/minted etc! Not a great solution.
-        const balancerTradeRecept = await swapUsingBalancer(member.token_address, swap);
-
-        // 6. Place order
-        // placeOrder(
-        //     investingAmount, 
-        //     member,
-        //     direction
-        // );        
     }
+
+    
 }
 
 main().catch(console.error);
