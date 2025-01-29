@@ -22,7 +22,7 @@ export interface MembersCache {
 }
 
 export interface Deal {
-    isExecutable?: boolean;
+    isProfitable?: boolean;
     tokenIn: string;
     tokenOut: string;
     amountOut: bigint;

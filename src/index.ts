@@ -61,7 +61,7 @@ const waitingTime: number = 1000; // 1 second
 const bufferFraction: number = 0.95;
 const maxOpenOrders: number = 10; // added to avoid spamming cowswap with orders
 const ratioCutoff: number = 0.1 // this value determines at which point we consider prices to have equilibrated.
-const EPSILON = BigInt(1e14);
+const EPSILON = BigInt(1e15);
 
 // constants 
 const cowswapChainId = SupportedChainId.GNOSIS_CHAIN
@@ -81,6 +81,7 @@ const postgressqlPort = 5432;
 const groupAddress = process.env.TEST_GROUP_ADDRESS!;
 const groupOperatorAddress = process.env.TEST_GROUP_OPERATOR!;
 const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
+// @todo move to env
 const CowSwapRelayerAddress = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110";
 const tokenWrapperContractAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const vaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
@@ -94,7 +95,6 @@ const walletV6 = new PrivateKeyContractRunner(providerV6, botPrivateKey);
 const selectedCirclesConfig = circlesConfig[100];
 const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
 const circlesData = new CirclesData(circlesRPC);
-console.log(selectedCirclesConfig)
 
 const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, wallet);
 
@@ -190,7 +190,6 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
     }
     const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
     // if there is no path, we return null
-    console.log(sorPaths.length);
     if (sorPaths.length === 0) {
         return null;
     }
@@ -253,74 +252,8 @@ async function getBotErc1155Balance(tokenAddress: string): Promise<bigint> {
     return balance.toBigInt();
 }
 
-async function mintPossibleGroupTokens(group: string, membersCache: MembersCache, threshold: bigint) {
-    const botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(botAddress);
-    // Filter tokens to keep tokens of gorup members only and apply some other filters
-    const filteredTokens = botBalances.filter(token => {
-        // @todo add filter to skip dust amount
-        // Only keep version === 2 tokens and skip group tokens
-        if (token.version !== 2 || token.isGroup) return false;
-      
-        // Check if this token's owner matches (case-insensitive) any of the member addresses
-        return membersCache?.members.some(member => 
-            member.address.toLowerCase() === token.tokenOwner.toLowerCase()
-        );
-    });
-
-    // Some logic to order the members by increasing value and then mint group tokens starting with the least valuable tokens until we reach the threshold
-    // Attention: Need to take care of the case where the have tokens for which we don't yet have a price => in this case we should fetch the price
-    // @todo needs to be implemented
-
-    // unwrap wrapped personal tokens to mint as a group token later
-    const unwrapQueue = filteredTokens.map(async (token) => {
-        if(token.isWrapped) {
-            if(token.isInflationary) {
-                await botAvatar.unwrapInflationErc20(token.tokenAddress, token.staticAttoCircles);
-            } else {
-                await botAvatar.unwrapDemurrageErc20(token.tokenAddress, token.staticAttoCircles);
-            }
-        }
-    });
-    await Promise.all(unwrapQueue);
-
-    await mintGroupTokensFromIndividualTokens(filteredTokens);
-}
-
-async function theoreticallyAvailableCRC(avatar: string): Promise<bigint> {
-    // check if it's a group or member
-    let mintableBalance = await botAvatar.getMintableAmount();
-    mintableBalance = ethers.utils.parseEther(mintableBalance.toString()).toBigInt();
-    let currentBalance = await botAvatar.getTotalBalance();
-    currentBalance = ethers.utils.parseEther(currentBalance.toString()).toBigInt();
-
-    //@todo not all tokens might be from group members
-    if(avatar == groupAddress) {
-        return currentBalance + mintableBalance;
-    } else {
-        const liftErc20Contract = new Contract("0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5", liftErc20Abi, wallet);
-
-        const erc20Representation = await liftErc20Contract.erc20Circles(1, avatar);
-        // erc1155 tokens
-        const botBalanceErc1155 = await hubV2Contract.balanceOf(groupAddress, ethers.BigNumber.from(avatar));
-        // erc20 tokens
-        const botBalanceErc20 = await getBotErc20Balance(erc20Representation);
-        
-        const maxVaultRedeemableAmount = await getMaxRedeemableAmount(avatar);
-
-        // Calculate net mintable
-        const netMintable = mintableBalance + currentBalance - BigInt(botBalanceErc1155) - botBalanceErc20;
-
-        // Compare and return the appropriate amount
-        if (maxVaultRedeemableAmount > netMintable) {
-            // effectively mintableBalance + currentBalance
-            return mintableBalance + currentBalance;
-        } else {
-            return BigInt(botBalanceErc1155) + botBalanceErc20 + maxVaultRedeemableAmount;
-        }
-    }
-}
-
 async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow[]) {
+    // @todo filter group tokens
     // We then mint the group tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
     // @todo filter duplications after unwrap
     const tokenAvatars = tokensToMint.map(token => token.tokenOwner);
@@ -334,10 +267,10 @@ async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow
         );
     }
 
-    const totalGroupTokensBalance = await getBotErc1155Balance(groupAddress);
+    //const totalGroupTokensBalance = await getBotErc1155Balance(groupAddress);
     // Wrap Group Tokens into ERC20
     // @todo filter dust amounts
-    await botAvatar.wrapInflationErc20(groupAddress, totalGroupTokensBalance);
+    //await botAvatar.wrapInflationErc20(groupAddress, totalGroupTokensBalance);
 }
 
 async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
@@ -371,7 +304,7 @@ async function approveTokenWithRelayer(tokenAddress: string): Promise<void> {
     console.log('Approval transaction confirmed');
 }
 
-async function swapUsingBalancer(swap: Swap): Promise<ethers.providers.TransactionReceipt> {
+async function swapUsingBalancer(swap: Swap): Promise<void> {
     console.log(
         `Input token: ${swap.inputAmount.token.address}, Amount: ${swap.inputAmount.amount}`
     );
@@ -381,7 +314,6 @@ async function swapUsingBalancer(swap: Swap): Promise<ethers.providers.Transacti
 
     // Get up to date swap result by querying onchain
     const updated = await swap.query(rpcUrl) as ExactInQueryOutput;
-    console.log(`Updated amount: ${updated.expectedAmountOut}`);
 
     const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
     const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
@@ -401,19 +333,18 @@ async function swapUsingBalancer(swap: Swap): Promise<ethers.providers.Transacti
     
     const callData = swap.buildCall(buildInput) as SwapBuildOutputExactIn;
 
-    //console.log("Swap call data:", callData);
-
     const groupTokenContract = new Contract(balancerGroupToken.address, erc20Abi, wallet);
     const approveTx = await groupTokenContract.approve(vaultAddress, swap.inputAmount.amount);
     await approveTx.wait();
 
-    const txResponse = await wallet.sendTransaction({to: callData.to, data: callData.callData});
-      
-    const txReceipt = await txResponse.wait();
-    console.log("Swap executed in tx:", txReceipt.transactionHash);
-
-    return txReceipt;
-
+    try {
+        const txResponse = await wallet.sendTransaction({to: callData.to, data: callData.callData});
+        const txReceipt = await txResponse.wait();
+        console.log("Swap executed in tx:", txReceipt.transactionHash);
+    } catch (error) {
+        // @todo write to error log
+        console.error("Transaction failed");
+    }    
 }
 
 async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
@@ -427,9 +358,7 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     }
 
     if(member.token_address !== ethers.constants.AddressZero && member.token_address !== undefined) {
-        console.log(member.token_address)
         const quote = await fetchBalancerQuote(member.token_address);
-        console.log(quote);
         if(quote) member.latest_price = quote!.inputAmount.amount;
         else member.latest_price = BigInt(0);
         member.last_price_update = Date.now();
@@ -438,9 +367,9 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     return member;
 }
 
-async function pickDeal(member: GroupMember): Promise<Deal> {
-    console.log(`pickDeal check stated`)
-    let isDeal = true;
+async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promise<Deal> {
+    const member = groupMembers[memberIndex];
+    let isExecutable = true;
     let tokenIn = groupTokenAddress;
     let tokenOut = member.token_address;
     let amountIn = member.latest_price ?? BigInt(0);
@@ -466,13 +395,17 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
     } 
     // Otherwise, it's within the epsilon range of 1e18
     else {
-        isDeal = false;
+        isExecutable = false;
+    }
+    
+    // check if bot has enough required CRC for the swap operation
+    if(isExecutable) {
+        const botBalances = await getBotBalances(groupMembers);
+        isExecutable = await requireTokens(tokenIn, amountIn, botBalances);
     }
 
-    // @todo check if enough CRC
-  
     return {
-        isExecutable: isDeal,
+        isProfitable: isExecutable,
         tokenIn,
         tokenOut,
         amountOut,
@@ -482,80 +415,178 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
 
 // return true if tokens are converted successfully, or there is enough tokens on the contract
 // return false if it it impossible to get these tokens
-function sumBalance(balances: TokenBalanceRow[]): bigint {
+function sumBalance(balances: TokenBalanceRow[], isStatic: boolean = true): bigint {
     return balances.reduce((sum, entry) => {
-        return sum + BigInt(entry.staticAttoCircles);
+        return isStatic ? sum + BigInt(entry.staticAttoCircles) : sum + BigInt(entry.attoCircles);
     }, BigInt(0));
 }
 
-// @dev `tokenAmount` in static CRC
-// @todo fix conversion form static to inflationary
+// @dev `tokenAmount` specified in static CRC
+// @todo update console logs statements
 async function requireTokens(tokenAddress: string, tokenAmount: bigint, balances: TokenBalanceRow[]): Promise<boolean> {
+    console.log(`Checking required tokens ${tokenAddress} ${tokenAmount}`);
+    // @dev require a bit more tokens to avoid precision issues
+    tokenAmount += EPSILON;
+    // @todo check if token is from member
+    // @todo replace with the balances array check
     const initialTokenBalance = await getBotErc20Balance(tokenAddress);
 
-    // @todo check compatibility between erc1155 and inflationary amount
     if(initialTokenBalance >= tokenAmount) return true;
     else {
         const lackingAmount = tokenAmount - initialTokenBalance;
-        console.log(`Lack some tokens: ${lackingAmount}`);
         // wrapped erc20
-        const tokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
-        const avatar = await tokenContract.avatar();
+        const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
+        const avatar = await inflationaryTokenContract.avatar();
+    
+        const getStaticBalance = balances.filter(balance => (avatar.toLowerCase() == balance.tokenOwner && balance.isErc1155 == true));
+        let tokensToWrapBalance = BigInt(0);
+        if(getStaticBalance.length) tokensToWrapBalance = BigInt(getStaticBalance[0].staticAttoCircles);
 
-        const tokensToWrapBalance = await getBotErc1155Balance(avatar);
-        //convertDemurrageToInflationaryValue()
         if(tokensToWrapBalance < lackingAmount){
-            console.log(`Some tokens would be missing after wrapping ${lackingAmount - tokensToWrapBalance}`);
             const tokensToMint = lackingAmount - tokensToWrapBalance;
 
+            // @todo optimize these two logical branches, they are similar
             if(tokenAddress == groupTokenAddress) {
                 // sumup members tokens without group tokens
                 const membersTokens = balances.filter(balance => balance.tokenOwner != groupAddress);
                 const additionalMintableGroupTokens = sumBalance(membersTokens);
 
-                console.log(`Additional mintable group tokens amount ${additionalMintableGroupTokens}`);
                 if(additionalMintableGroupTokens < tokensToMint) return false;
                 else {
-                    // @todo some member tokens needs unwrapping before mint
-                    // @todo mint tokensToMint precisely
-                    return true;
+                    let accumulatedAmount = BigInt(0);
+                    const utilizableBalances = membersTokens.filter(balance => {
+                        if(accumulatedAmount < tokensToMint) {
+                            accumulatedAmount += BigInt(balance.staticAttoCircles)
+                            return true;
+                        } else {
+                            return false;
+                        }
+                    });
+
+                    console.log("Tokens unwrapping")
+                    // unwrap tokens required for minting
+                    const unwrappingQueue = utilizableBalances.map(async (token) => {
+                        if(token.isInflationary && token.isErc20) {
+                            await botAvatar.unwrapInflationErc20(token.tokenAddress, token.staticAttoCircles);
+                        } else if(token.isErc20) {
+                            await botAvatar.unwrapDemurrageErc20(token.tokenAddress, token.staticAttoCircles);
+                        } 
+                    })
+                    await Promise.all(unwrappingQueue);
+
+                    console.log("Group tokens mint started")
+                    await mintGroupTokensFromIndividualTokens(utilizableBalances);
                 }
             } else {
                 const maxRedeemableTokensAmount = await getMaxRedeemableAmount(avatar);
                 const filteredBalance = balances.filter(balance => balance.tokenOwner != avatar);
-                const additionalMintableMemberTokens = sumBalance(filteredBalance);
+                const additionalMintableTokens = sumBalance(filteredBalance);
                 // and if we have enough tokens (group tokens + members toekns) to redeem that amount
                 if(
-                    additionalMintableMemberTokens >= tokensToMint
+                    additionalMintableTokens >= tokensToMint
                     && maxRedeemableTokensAmount >= tokensToMint
                 ) {
-                    console.log(`We might redeem tokens ${tokensToMint}`)
+                    // @todo this flow is duplicated
+                    // check if we have enough group tokens + including and excluding other tokens
+                    // @todo mint enough group tokens
+                    let accumulatedAmount = BigInt(0);
+                    
+                    // @todo optimize algorithm not to go to filter the balances tail 
+                    // @todo we might ming a more than required
+                    const utilizableBalances = filteredBalance.filter(balance => {
+                        if(accumulatedAmount < tokensToMint) {
+                            accumulatedAmount += BigInt(balance.staticAttoCircles)
+                            return true;
+                        } else {
+                            return false;
+                        }
+                    });
+                    console.log("Tokens unwrapping")
+                    // unwrap tokens required for minting
+                    const unwrappingQueue = utilizableBalances.map(async (token) => {
+                        if(token.isInflationary && token.isErc20) {
+                            await botAvatar.unwrapInflationErc20(token.tokenAddress, token.staticAttoCircles);
+                        } else if(token.isErc20) {
+                            await botAvatar.unwrapDemurrageErc20(token.tokenAddress, token.staticAttoCircles);
+                        } 
+                    })
+                    await Promise.all(unwrappingQueue);
 
-                    // @todo check if group tokens + other member tokens are enough to redeem
-                    return true;
+                    // filter the group tokens
+                    const filteredGroupTokens = utilizableBalances.filter(token => token.tokenOwner != groupAddress);
+
+                    console.log("Group tokens mint")
+                    await mintGroupTokensFromIndividualTokens(filteredGroupTokens);
+                    
+                    console.log("Group tokens redeem");
+                    const demurrageValue = await convertInflationaryToDemurrage(tokenAddress, tokensToMint);
+                    // @todo optimize the `convertInflationaryToDemurrageValue` with the onchain calculation
+                    //console.log(redeemableAmount, tokensToMint);
+                    await redeemGroupTokens([avatar], [demurrageValue]);
+                    // convert to group tokens
+                    // redeem required amount from group
+
                 } else {
-                    console.log(`We can't redeem tokens. Tokens to mint ${tokensToMint}, additional mintable amount ${additionalMintableMemberTokens}, MaxRedeemableAmount ${maxRedeemableTokensAmount}`);
-                    return false
+                    return false;
                 }
             }
-            // @todo get max possible amount;
 
-            // @todo wrap the minted group or personal tokens
-            // @todo finish
-        } else {
-            // @todo wrap `tokensToWrapBalance` erc1155
-            return true;
         }
-        // has erc1155
-        // might get throw the group
-        // may not get from group
+        
+        // @dev we reach this point as long as we hav enough tokens, otherwise `false` is already returned
+        const convertedAmount = await convertInflationaryToDemurrage(tokenAddress, lackingAmount - EPSILON);
+        console.log(`Wrapping tokens`)
+        await botAvatar.wrapInflationErc20(avatar, convertedAmount);
+
+        return true;
     }
+}
+
+async function convertInflationaryToDemurrage(tokenAddress: string, amount: bigint): Promise<bigint> {
+    const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, wallet);
+    const days = await inflationaryTokenContract.day((await provider.getBlock('latest')).timestamp)
+    const demurrageValue = await inflationaryTokenContract.convertInflationaryToDemurrageValue(amount, days);
+
+    return demurrageValue.toBigInt();
+}
+
+// @dev sort according to the order [group token erc1155 balance, group erc20 balance, ...other balances in DESC order by `staticAttoCircles`
+function sortBalances(balances: TokenBalanceRow[]): TokenBalanceRow[] {
+    return balances.sort((a, b) => {
+        // Check if the tokenOwner is a groupAddress and isErc1155
+        const aIsErc1155 = a.tokenOwner === groupAddress && a.isErc1155;
+        const bIsErc1155 = b.tokenOwner === groupAddress && b.isErc1155;
+
+        // Check if the tokenOwner is a groupAddress and isInflationary
+        const aIsInflationary = a.tokenOwner === groupAddress && a.isInflationary;
+        const bIsInflationary = b.tokenOwner === groupAddress && b.isInflationary;
+
+        // Prioritize items with tokenOwner equal to groupAddress and isErc1155
+        if (aIsErc1155 && !bIsErc1155) return -1;
+        if (!aIsErc1155 && bIsErc1155) return 1;
+
+        // Prioritize items with tokenOwner equal to groupAddress and isInflationary
+        if (aIsInflationary && !bIsInflationary) return -1;
+        if (!aIsInflationary && bIsInflationary) return 1;
+
+        // Sort the rest in DESC order by staticAttoCircles
+        const result = BigInt(b.staticAttoCircles) - BigInt(a.staticAttoCircles);
+
+        if (result > BigInt(0)) {
+            return 1;
+        } else if (result < BigInt(0)){
+            return -1;
+        } else {
+            return 0;
+        }
+    });
 }
 
 async function execDeal(deal: Deal): Promise<void> {
     // @todo check the current balance
-    console.log(`Executing deal tokenIn: ${deal.tokenIn}, tokenOut: ${deal.tokenOut}`);
-    if(deal.swapData) await swapUsingBalancer(deal.swapData);
+    if(deal.swapData) {
+        await swapUsingBalancer(deal.swapData);
+    }
 }
 // Main function
 
@@ -569,45 +600,40 @@ async function getBotBalances(members: GroupMember[]): Promise<TokenBalanceRow[]
         memberAddresses.has(balance.tokenOwner.toLowerCase())
     );
       
-    return filteredBalances;
+    return sortBalances(filteredBalances);
 }
 
 async function main() {
-    try {
-        await walletV6.init();
-        sdk = new Sdk(walletV6, selectedCirclesConfig);
-        botAvatar = await sdk.getAvatar(botAddress);
+    await walletV6.init();
+    sdk = new Sdk(walletV6, selectedCirclesConfig);
+    botAvatar = await sdk.getAvatar(botAddress);
 
+    // @todo consider updating the balance after swap
+
+    while(true) {
+        // @todo optimize the logic of updating the members list 
         const membersCache = await initializeMembersCache();
-        let botBalances = await getBotBalances(membersCache.members);
+        console.log("Loop iteration start");
 
-        while (true) {
+        for(let i = 0; i < membersCache.members.length; i++) {
+            // @todo prettify
+            try {
+                await updateMemberCache(membersCache.members[i]);
 
-                console.log("Loop iteration start");
+                if (membersCache.members[i].latest_price) {
+                    const deal = await pickDeal(i, membersCache.members);
 
-                for (let i = 0; i < membersCache.members.length; i++) {
-                    try {
-                        const newMemberState = await updateMemberCache(membersCache.members[i]);
-                    
-                        if (newMemberState.latest_price) {
-                            const deal = await pickDeal(newMemberState);
-                            if (deal) {
-                                await execDeal(deal);
-                            }
-                        }
-                        
-                        membersCache.members[i] = newMemberState;
-                    }
-                    catch (error) {
-                        console.error("Error in main loop iteration:", error);
-                        // Optionally, add a delay before restarting the loop
-                        await new Promise(resolve => setTimeout(resolve, 5000));
+                    if(deal.isProfitable) {
+                        await execDeal(deal);
                     }
                 }
-            } 
-    } catch (error) {
-        console.error("Error in main function:", error);
-        process.exit(1); // Exit with a non-zero code to trigger PM2 restart
+            } catch (error) {
+                console.error("Error in main loop iteration:", error);
+                // Optionally, add a delay before restarting the loop
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+        }
+        // @todo write some logic to clear the dust amounts of CRC
     }
 }
 

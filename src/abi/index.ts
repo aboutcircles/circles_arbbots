@@ -127,6 +127,29 @@ export const inflationaryTokenAbi = [
         payable: false,
         stateMutability: "view",
         type: "function"
+    },
+    {
+        inputs: [
+            { name: "_inflationaryValue", type: "uint256" },
+            { name: "_day", type: "uint64" }
+        ],
+        name: "convertInflationaryToDemurrageValue",
+        outputs: [
+            { type: "uint256" }
+        ],
+        stateMutability: "pure",
+        type: "function"
+    },
+    {
+        inputs: [
+            { name: "_timestamp", type: "uint256" }
+        ],
+        name: "day",
+        outputs: [
+            { type: "uint64" }
+        ],
+        stateMutability: "view",
+        type: "function"
     }
 ];
 
