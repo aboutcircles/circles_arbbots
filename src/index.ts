@@ -582,27 +582,29 @@ async function main() {
         let botBalances = await getBotBalances(membersCache.members);
 
         while (true) {
-            try {
+
                 console.log("Loop iteration start");
 
                 for (let i = 0; i < membersCache.members.length; i++) {
-                    const newMemberState = await updateMemberCache(membersCache.members[i]);
-
-                    if (newMemberState.latest_price) {
-                        const deal = await pickDeal(newMemberState);
-                        if (deal) {
-                            await execDeal(deal);
+                    try {
+                        const newMemberState = await updateMemberCache(membersCache.members[i]);
+                    
+                        if (newMemberState.latest_price) {
+                            const deal = await pickDeal(newMemberState);
+                            if (deal) {
+                                await execDeal(deal);
+                            }
                         }
+                        
+                        membersCache.members[i] = newMemberState;
                     }
-
-                    membersCache.members[i] = newMemberState;
+                    catch (error) {
+                        console.error("Error in main loop iteration:", error);
+                        // Optionally, add a delay before restarting the loop
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+                    }
                 }
-            } catch (error) {
-                console.error("Error in main loop iteration:", error);
-                // Optionally, add a delay before restarting the loop
-                await new Promise(resolve => setTimeout(resolve, 5000));
-            }
-        }
+            } 
     } catch (error) {
         console.error("Error in main function:", error);
         process.exit(1); // Exit with a non-zero code to trigger PM2 restart
