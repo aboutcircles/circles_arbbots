@@ -5,8 +5,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
-    "start": "pm2 start dist/bot.js --interpreter ts-node --name arbbot",
-    "start:dev": "ts-node dist/bot.js"
+    "start": "npm run build && pm2 start dist/index.js --interpreter ts-node --name arbbot --no-daemon",
+    "start:dev": "ts-node dist/index.js"
   },
   "keywords": [],
   "author": "",
