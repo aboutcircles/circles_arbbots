@@ -573,41 +573,43 @@ async function getBotBalances(members: GroupMember[]): Promise<TokenBalanceRow[]
 }
 
 async function main() {
-    await walletV6.init();
-    sdk = new Sdk(walletV6, selectedCirclesConfig);
-    botAvatar = await sdk.getAvatar(botAddress);
+    try {
+        await walletV6.init();
+        sdk = new Sdk(walletV6, selectedCirclesConfig);
+        botAvatar = await sdk.getAvatar(botAddress);
 
-    const membersCache = await initializeMembersCache();
-    let botBalances = await getBotBalances(membersCache.members); // @todo consider updating the balance after swap
-    /*
-    const possibleToGet = await requireTokens(
-        "0x159e6881e6ec370b46f2fe9fe75cbdfd8f7877b4",
-        BigInt(160e18),
-        botBalances
-    );
-    console.log(`Is possible to get ${possibleToGet}`);
-    */
-    while(true) {
-        console.log("Loop iteration start");
+        const membersCache = await initializeMembersCache();
+        let botBalances = await getBotBalances(membersCache.members);
 
-        for(let i = 0; i < membersCache.members.length; i++) {
-            const newMemberState = await updateMemberCache(membersCache.members[i]);
+        while (true) {
+            try {
+                console.log("Loop iteration start");
 
-            if (newMemberState.latest_price) {
-                const deal = await pickDeal(newMemberState);
-                // @todo check if we have enough tokens
-                if(deal) {
-                    await execDeal(deal);
+                for (let i = 0; i < membersCache.members.length; i++) {
+                    const newMemberState = await updateMemberCache(membersCache.members[i]);
+
+                    if (newMemberState.latest_price) {
+                        const deal = await pickDeal(newMemberState);
+                        if (deal) {
+                            await execDeal(deal);
+                        }
+                    }
+
+                    membersCache.members[i] = newMemberState;
                 }
+            } catch (error) {
+                console.error("Error in main loop iteration:", error);
+                // Optionally, add a delay before restarting the loop
+                await new Promise(resolve => setTimeout(resolve, 5000));
             }
-
-            membersCache.members[i] = newMemberState;
         }
+    } catch (error) {
+        console.error("Error in main function:", error);
+        process.exit(1); // Exit with a non-zero code to trigger PM2 restart
     }
-
-    
 }
 
-main().catch(console.error);
-
-
+main().catch(error => {
+    console.error("Unhandled error in main function:", error);
+    process.exit(1); // Exit with a non-zero code to trigger PM2 restart
+});
