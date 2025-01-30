@@ -1,19 +1,22 @@
 import { Swap } from "@balancer/sdk";
+import { Avatar } from '@circles-sdk/sdk';
 import { TokenBalanceRow } from '@circles-sdk/data';
 
-
+// @todo utilize the bot state type
 export interface Bot {
+    avatar?: Avatar;
     balances: TokenBalanceRow[];
     address: string;
     groupAddress: string;
     groupTokenAddress: string;
+    approvedTokens: string[]
 }
 
 export interface GroupMember {
     address: string;
-    token_address: string;
-    latest_price: bigint | null; // the price of the member token in units of the group token in human readonable format
-    last_price_update: number | null; // the timestamp of the last price update
+    tokenAddress: string;
+    latestPrice?: bigint; // the price of the member token in units of the group token in human readonable format
+    lastPriceUpdate?: number; // the timestamp of the last price update
 }
 
 export interface MembersCache {
