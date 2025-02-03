@@ -31,6 +31,11 @@ export interface Deal {
     swapData?: Swap | null;
 }
 
+export interface GuessAmountOut {
+    amountOut: bigint;
+    swapData: Swap | null;
+}
+
 export enum ArbDirection {
     REDEEM = "REDEEM",
     GROUP_MINT = "GROUP_MINT",

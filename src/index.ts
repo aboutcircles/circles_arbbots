@@ -30,6 +30,7 @@ const { Client } = pg;
 import {
     Bot,
     Deal,
+    GuessAmountOut,
     GroupMember,
     MembersCache,
 } from "./interfaces/index.js";
@@ -143,7 +144,7 @@ async function checkAllowance(tokenAddress: string, ownerAddress: string, spende
 
 
 // Fetch the latest price for an individual token (in units of the group token)
-async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean = true, amonutOut: bigint = BigInt(1e18)) : Promise<Swap | null> {
+async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean = true, amountOut: bigint = BigInt(1e18)) : Promise<Swap | null> {
     const memberToken = new Token(
         chainId,
         tokenAddress as `0x${string}`,
@@ -160,7 +161,7 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
         tokenIn: inToken.address,
         tokenOut: outToken.address,
         swapKind: swapKind,
-        swapAmount: TokenAmount.fromRawAmount(outToken, amonutOut)
+        swapAmount: TokenAmount.fromRawAmount(outToken, amountOut)
     }
 
     const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
@@ -196,7 +197,7 @@ async function updateMembersCache(membersCache: MembersCache) {
     console.log("Fetching latest members...");
     const newMembers = await getLatestGroupMembers(membersCache.lastUpdated);
 
-    Array.prototype.push.apply(membersCache.members, newMembers);
+    membersCache.members.push(...newMembers);
     membersCache.lastUpdated = Math.floor(Date.now() / 1000);
 
 }
@@ -290,43 +291,49 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     const tokenWrapperContract = new Contract(erc20LiftAddress, erc20LiftAbi, wallet);
     // we call the contract 1 by 1 for each address
     
-    if(member.tokenAddress === ethers.ZeroAddress || member.tokenAddress === undefined) {
+    if(member.tokenAddress === ethers.ZeroAddress || !member.tokenAddress) {
         const tokenAddress = await tokenWrapperContract.erc20Circles(DemurragedVSInflation, member.address);
         member.tokenAddress = tokenAddress;
     }
 
-    if(member.tokenAddress !== ethers.ZeroAddress && member.tokenAddress !== undefined) {
+    if(member.tokenAddress !== ethers.ZeroAddress && member.tokenAddress) {
         const quote = await fetchBalancerQuote(member.tokenAddress);
         if(quote) member.latestPrice = quote!.inputAmount.amount;
-        else member.latestPrice = BigInt(0);
-        member.lastPriceUpdate = Date.now();
+        member.latestPrice = quote ? quote.inputAmount.amount : 0n;
+        member.lastPriceUpdate = Math.floor(Date.now() / 1000);
     }
 
     return member;
 }
 
-async function amountOutGuesser(tokenAddress: string, direction: boolean = true, prevPrice: bigint = BigInt(0), amountOut: bigint = BigInt(1e18)): Promise<[bigint, Swap | null]> {
+async function amountOutGuesser(tokenAddress: string, direction: boolean = true, currentPrice: bigint = BigInt(0), currentAmountOut: bigint = BigInt(1e18)): Promise<GuessAmountOut> {
     console.log("Checking the best `amountOut`")
-    const expectedAttempts = 100;
+    const maxAttempts = 100;
     const requiredToken = direction ? tokenAddress : arbBot.groupTokenAddress;
-    let swapData = null;
+    let bestSwapData: Swap | null = null;
 
-    for(let i = expectedAttempts; i > 0; i--) {
-        const quote = await fetchBalancerQuote(tokenAddress, direction, amountOut * BigInt(2));
-        const nextPrice = quote?.inputAmount.amount || BigInt(0);
+    for(let i = 0; i > maxAttempts; i++) {
+        // Propose a new amount by doubling the current amount out.
+        const proposedAmountOut = currentAmountOut * 2n;
 
-        if(prevPrice < nextPrice && amountOut > nextPrice) {
+        const quote = await fetchBalancerQuote(tokenAddress, direction, proposedAmountOut);
+        const nextPrice = quote?.inputAmount.amount ?? BigInt(0);
+
+        if(currentPrice < nextPrice && currentAmountOut > nextPrice) {
             const isExecutable = await requireTokens(requiredToken, nextPrice);
 
             if(isExecutable) {
-                amountOut *= BigInt(2);
-                prevPrice = nextPrice;
-                swapData = quote;
-            } else break;
-        } else break;
+                currentAmountOut = proposedAmountOut;
+                currentPrice = nextPrice;
+                bestSwapData = quote;
+            } else break; // Stop if tokens cannot be acquired.
+        } else break; // Exit if no improvement is found.
     }
 
-    return [amountOut, swapData];
+    return {
+        amountOut: currentAmountOut,
+        swapData: bestSwapData
+    };
 }
 
 async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promise<Deal> {
@@ -354,7 +361,7 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
     } 
     // If it's definitely lower than 1e18
     else if (amountIn < BigInt(1e18) - EPSILON) {
-        // we jsut move forward
+        // we just move forward
         swapData = await fetchBalancerQuote(member.tokenAddress, direction);
         
     } 
@@ -370,10 +377,9 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
         isExecutable = await requireTokens(tokenIn, amountIn);
 
         if(isExecutable) {
-            // @todo replace output with object
-            let newSwapData;
-            [amountOut, newSwapData] = await amountOutGuesser(member.tokenAddress, direction, amountIn);
-            if(newSwapData) swapData = newSwapData;
+            const recommendedSwap = await amountOutGuesser(member.tokenAddress, direction, amountIn);
+            amountOut = recommendedSwap.amountOut
+            swapData = recommendedSwap.swapData ?? swapData;
         }
     }
 
@@ -606,7 +612,7 @@ async function execDeal(deal: Deal, member: GroupMember): Promise<void> {
             const currentAllowance = await checkAllowance(tokenAddressToApprove, arbBot.address, balancerVaultAddress)
             if (currentAllowance != MAX_ALLOWANCE_AMOUNT)
                 await approveTokens(tokenAddressToApprove, balancerVaultAddress);
-            // Add prroved tokens to the list
+            // Add approved tokens to the list
             arbBot.approvedTokens.push(tokenAddressToApprove);
         }
         // execute swap
@@ -651,17 +657,16 @@ async function main() {
                     const deal = await pickDeal(i, arbBot.groupMembersCache.members);
 
                     if(deal.isProfitable) {
-                        console.log("Start Swap execution");
                         await execDeal(deal, arbBot.groupMembersCache.members[i]);
                     }
                 }
             } catch (error) {
                 console.error("Error in main loop iteration:", error);
                 // Optionally, add a delay before restarting the loop
-                await new Promise(resolve => setTimeout(resolve, 3000));
             }
         }
         // @todo clear the dust CRCs
+        // @todo consider introducing some delay if there was no arbitrage opportunities for a long time
     }
 }
 
