@@ -5,7 +5,7 @@ import { TokenBalanceRow } from '@circles-sdk/data';
 // @todo utilize the bot state type
 export interface Bot {
     avatar?: Avatar;
-    balances: TokenBalanceRow[];
+    groupMembersCache?: MembersCache;
     address: string;
     groupAddress: string;
     groupTokenAddress: string;
@@ -29,7 +29,7 @@ export interface Deal {
     tokenIn: string;
     tokenOut: string;
     amountOut: bigint;
-    swapData: Swap | null;
+    swapData?: Swap | null;
 }
 
 export enum ArbDirection {
