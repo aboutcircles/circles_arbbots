@@ -1,5 +1,6 @@
 # ArbBot
 
+```
 1. INITIALIZATION
    ├─ Load environment variables (RPC_URL, ARBBOT_ADDRESS, PRIVATE_KEY, etc.)
    ├─ Set up WebSocket and ethers provider
@@ -48,3 +49,4 @@
 3. ERROR HANDLING
    ├─ Catch and log errors during database queries, on-chain calls, or transactions
    └─ If a fatal error occurs in the main function, exit with a non-zero code (for restart by a process manager)
+```
