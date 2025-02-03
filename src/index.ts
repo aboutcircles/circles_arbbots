@@ -4,11 +4,8 @@ import "dotenv/config";
 import WebSocket from "ws";
 global.WebSocket = WebSocket as unknown as typeof globalThis.WebSocket;
 
-// Import ethers v5
-import { ethers, Contract } from "ethers";
-// Import ethers v6 (aliased in package.json)
-// @dev two ethers versions are required as v5 is used by CoWswap sdk and v6 by the Circles sdk
-import { ethers as ethers6 } from "ethers6";
+// Import ethers v6
+import { ethers, Contract, Wallet } from "ethers";
 
 import {
     BalancerApi,
@@ -46,7 +43,6 @@ import {
     superGroupOperatorAbi,
     inflationaryTokenAbi
 } from "./abi/index.js";
-import { queryObjects } from "v8";
 
 // Algorithm parameters
 const EPSILON = BigInt(1e15);
@@ -58,7 +54,7 @@ const rpcUrl = process.env.RPC_URL!;
 const botAddress = process.env.ARBBOT_ADDRESS!;
 const botPrivateKey = process.env.PRIVATE_KEY!;
 // @dev use ethers v6 big int 
-const MAX_ALLOWANCE_AMOUNT = ethers6.MaxUint256;
+const MAX_ALLOWANCE_AMOUNT = ethers.MaxUint256;
 const DemurragedVSInflation = 1;
 
 const postgresqlPW = process.env.POSTGRESQL_PW;
@@ -74,17 +70,12 @@ const erc20LiftAddress = process.env.ERC20LIFT_ADDRESS!;
 const balancerVaultAddress = process.env.BALANCER_VAULT_ADDRESS!;
 
 // Initialize relevant objects
-// @dev For a potential future integration with CoW Swap, we need two versions of Ether, as the
-// CoW Swap SDK does not support Ethers v6
-const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-const providerV6 = new ethers6.JsonRpcProvider(rpcUrl);
-
-const wallet = new ethers.Wallet(botPrivateKey, provider);
-const walletV6 = new PrivateKeyContractRunner(providerV6, botPrivateKey);
+const provider = new ethers.JsonRpcProvider(rpcUrl);
+const wallet = new Wallet(botPrivateKey, provider);
 const selectedCirclesConfig = circlesConfig[100];
 const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
 const circlesData = new CirclesData(circlesRPC);
-const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, wallet);
+const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, provider);
 
 let
     sdk: Sdk | null,
@@ -92,7 +83,11 @@ let
         address: botAddress,
         groupAddress,
         groupTokenAddress,
-        approvedTokens: []
+        approvedTokens: [],
+        groupMembersCache: {
+            lastUpdated: 0,
+            members: []
+        }
     };
 
 const balancerApi = new BalancerApi(
@@ -127,7 +122,7 @@ async function connectClient() {
 connectClient();
 
 // Helper functions
-async function getLatestGroupMembers(since: bigint): Promise<GroupMember[]> {
+async function getLatestGroupMembers(since: number): Promise<GroupMember[]> {
     try {
         const res = await client.query('SELECT "member" AS "address" FROM "V_CrcV2_GroupMemberships" WHERE "group" = $1 AND timestamp > $2', [arbBot.groupAddress, since]);
         return res.rows as GroupMember[];
@@ -143,7 +138,7 @@ async function checkAllowance(tokenAddress: string, ownerAddress: string, spende
 
     // Fetch the allowance
     const allowance = await tokenContract.allowance(ownerAddress, spenderAddress);
-    return allowance.toBigInt();
+    return allowance;
 }
 
 
@@ -185,8 +180,8 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
     // @dev We attempt to make this call to validate the swap parameters, ensuring we avoid potential errors such as `BAL#305` or other issues related to swap input parameters.
     try {
         await swap.query(rpcUrl) as ExactInQueryOutput;
-    } catch (error) {
-        console.error(error.shortMessage);
+    } catch (error: any) {
+        console.error(error?.shortMessage);
         return null;
     }
 
@@ -194,19 +189,16 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
 }
 
 // @todo At some point this needs to be updated to some subset of new members, etc. 
-async function initializeMembersCache(): Promise<MembersCache> {
-    console.log("Initializing members cache...");
+async function updateMembersCache(membersCache: MembersCache) {
+    console.log("Updating members cache...");
 
     // We fetch the latest members from the database
     console.log("Fetching latest members...");
-    const earlyNumber: number = 0;
-    let members = await getLatestGroupMembers(BigInt(earlyNumber));
+    const newMembers = await getLatestGroupMembers(membersCache.lastUpdated);
 
-    console.log(members);
-    return {
-        lastUpdated: Date.now(),
-        members: members
-    };
+    Array.prototype.push.apply(membersCache.members, newMembers);
+    membersCache.lastUpdated = Math.floor(Date.now() / 1000);
+
 }
 
 async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
@@ -215,17 +207,10 @@ async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
 
     // Fetch the balance
     let balance = await tokenContract.balanceOf(arbBot.address);
-    return balance.toBigInt();
-}
-
-async function getBotErc1155Balance(tokenAddress: string): Promise<bigint> {
-    // Fetch the balance
-    const balance = await hubV2Contract.balanceOf(arbBot.address, ethers.BigNumber.from(tokenAddress));
-    return balance.toBigInt();
+    return balance;
 }
 
 async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow[]) {
-    // @todo filter group tokens
     // We then mint the group tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
     // @todo filter duplications after unwrap
     const tokenAvatars = tokensToMint.map(token => token.tokenOwner);
@@ -246,8 +231,8 @@ async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
     const groupTreasuryContract = new Contract(groupTreasuryAddress, groupTreasuryAbi, provider);
     const groupVaultAddress = await groupTreasuryContract.vaults(arbBot.groupAddress);
 
-    const balance = await hubV2Contract.balanceOf(groupVaultAddress, ethers.BigNumber.from(memberAddress));
-    return balance.toBigInt();
+    const balance = await hubV2Contract.balanceOf(groupVaultAddress, BigInt(memberAddress));
+    return balance;
 }
 
 async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): Promise<void> {
@@ -256,7 +241,7 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): 
     let tx = await hubV2Contract.setApprovalForAll(groupOperatorAddress, true);
     await tx.wait();
     
-    const memberAddressesToBigNumber = memberAddresses.map(memberAddress => ethers.BigNumber.from(memberAddress))
+    const memberAddressesToBigNumber = memberAddresses.map(memberAddress => BigInt(memberAddress))
     const superGroupOperatorContract = new Contract(groupOperatorAddress, superGroupOperatorAbi, wallet);
     tx = await superGroupOperatorContract.redeem(arbBot.groupAddress, memberAddressesToBigNumber, amounts);
     await tx.wait();
@@ -293,8 +278,7 @@ async function swapUsingBalancer(swap: Swap): Promise<void> {
 
     try {
         const txResponse = await wallet.sendTransaction({to: callData.to, data: callData.callData});
-        const txReceipt = await txResponse.wait();
-        console.log("Swap executed in tx:", txReceipt.transactionHash);
+        console.log("Swap tx:", txResponse.hash);
     } catch (error) {
         // @todo write to error log
         console.error("!!! Transaction failed !!!");
@@ -306,12 +290,12 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     const tokenWrapperContract = new Contract(erc20LiftAddress, erc20LiftAbi, wallet);
     // we call the contract 1 by 1 for each address
     
-    if(member.tokenAddress === ethers.constants.AddressZero || member.tokenAddress === undefined) {
+    if(member.tokenAddress === ethers.ZeroAddress || member.tokenAddress === undefined) {
         const tokenAddress = await tokenWrapperContract.erc20Circles(DemurragedVSInflation, member.address);
         member.tokenAddress = tokenAddress;
     }
 
-    if(member.tokenAddress !== ethers.constants.AddressZero && member.tokenAddress !== undefined) {
+    if(member.tokenAddress !== ethers.ZeroAddress && member.tokenAddress !== undefined) {
         const quote = await fetchBalancerQuote(member.tokenAddress);
         if(quote) member.latestPrice = quote!.inputAmount.amount;
         else member.latestPrice = BigInt(0);
@@ -506,11 +490,11 @@ async function mintIfPossibleFromOthers(
 
 // @dev `tokenAmount` specified in static CRC
 async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise<boolean> {
-    // @todo get current Bot balances
-    
-    let balances;
-    if(arbBot?.groupMembersCache)
-        balances = await getBotBalances(arbBot.groupMembersCache.members);
+    if (!arbBot.groupMembersCache) return false;
+
+    const balances = await getBotBalances(arbBot.groupMembersCache.members);
+
+    if(!balances) return false;
 
     // @todo check if token is from member
     console.log(`Checking required tokens ${tokenAddress} ${tokenAmount}`);
@@ -568,12 +552,12 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
   
 
 async function convertInflationaryToDemurrage(tokenAddress: string, amount: bigint): Promise<bigint> {
-    // @todo replace with a single view endpoint onchain
+    // @todo replace with a single onchain view function
     const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, wallet);
-    const days = await inflationaryTokenContract.day((await provider.getBlock('latest')).timestamp)
+    const days = await inflationaryTokenContract.day((await provider.getBlock('latest'))?.timestamp)
     const demurrageValue = await inflationaryTokenContract.convertInflationaryToDemurrageValue(amount, days);
 
-    return demurrageValue.toBigInt();
+    return demurrageValue;
 }
 
 // @dev sort according to the order [group token erc1155 balance, group erc20 balance, ...other balances in DESC order by `staticAttoCircles`
@@ -615,7 +599,6 @@ async function approveTokens(tokenAddress: string, operatorAddress: string, amou
 }
 
 async function execDeal(deal: Deal, member: GroupMember): Promise<void> {
-    // @todo check the current balance
     if(deal.swapData) {
         const tokenAddressToApprove = deal.swapData.inputAmount.token.address;
         // set max allowance if it is not set
@@ -630,55 +613,46 @@ async function execDeal(deal: Deal, member: GroupMember): Promise<void> {
         await swapUsingBalancer(deal.swapData);
     }
 }
-// Main function
 
-async function getBotBalances(members: GroupMember[]): Promise<TokenBalanceRow[]> {
+// Main function
+async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalanceRow[]> {
     let botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(arbBot.address);
-    // @todo add filter version 2 tokens
-    let memberAddresses = new Set(members.map(m => m.address.toLowerCase()));
+
+    let memberAddresses = new Set(members.map(member => member.address.toLowerCase()));
     memberAddresses.add(arbBot.groupAddress);
 
-    const filteredBalances = botBalances.filter(balance =>
-        memberAddresses.has(balance.tokenOwner.toLowerCase())
+    const filteredBalances = botBalances.filter(token =>
+        memberAddresses.has(token.tokenOwner.toLowerCase()) && token.version === 2
     );
       
     return sortBalances(filteredBalances);
 }
 
 async function main() {
-    await walletV6.init();
-    sdk = new Sdk(walletV6, selectedCirclesConfig);
+    //await sdkContractRunner.init();
+    sdk = new Sdk(wallet, selectedCirclesConfig);
     const botAvatar = await sdk.getAvatar(arbBot.address);
-    const membersCache = await initializeMembersCache();
     arbBot = {
         ...arbBot,
-        avatar: botAvatar,
-        groupMembersCache: membersCache
+        avatar: botAvatar
     };
 
-    
-
-    //const result = await amountOutGuesser("0xfa771dd0237e80c22ab8fbfd98c1904663b46e36");
-    //console.log(`Optimal swap for the token "0xfa771dd0237e80c22ab8fbfd98c1904663b46e36" amountOut: ${result[0]}`);
-    //console.log(result[1])
-
     while(true) {
-        // @todo optimize the logic of updating the members list 
-        
-        console.log("Loop iteration start");
 
-        for(let i = 0; i < membersCache.members.length; i++) {
+        console.log("Loop iteration start");
+        await updateMembersCache(arbBot.groupMembersCache);        
+
+        for(let i = 0; i < arbBot.groupMembersCache.members.length; i++) {
             // @todo prettify
             try {
-                await updateMemberCache(membersCache.members[i]);
+                await updateMemberCache(arbBot.groupMembersCache.members[i]);
 
-                if (membersCache.members[i].latestPrice) {
-                    const deal = await pickDeal(i, membersCache.members);
+                if (arbBot.groupMembersCache.members[i].latestPrice) {
+                    const deal = await pickDeal(i, arbBot.groupMembersCache.members);
 
                     if(deal.isProfitable) {
-                        console.log("Start Swap exec", deal)
-                        // @todo check batch swaps
-                        await execDeal(deal, membersCache.members[i]);
+                        console.log("Start Swap execution");
+                        await execDeal(deal, arbBot.groupMembersCache.members[i]);
                     }
                 }
             } catch (error) {
@@ -687,8 +661,7 @@ async function main() {
                 await new Promise(resolve => setTimeout(resolve, 3000));
             }
         }
-        // @todo update membersCache with new members
-        // @todo write some logic to clear the dust amounts of CRC
+        // @todo clear the dust CRCs
     }
 }
 

@@ -2,10 +2,9 @@ import { Swap } from "@balancer/sdk";
 import { Avatar } from '@circles-sdk/sdk';
 import { TokenBalanceRow } from '@circles-sdk/data';
 
-// @todo utilize the bot state type
 export interface Bot {
     avatar?: Avatar;
-    groupMembersCache?: MembersCache;
+    groupMembersCache: MembersCache;
     address: string;
     groupAddress: string;
     groupTokenAddress: string;
