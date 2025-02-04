@@ -15,13 +15,12 @@ import {
     Token,
     TokenAmount,
     Swap,
-    SwapBuildOutputExactIn,
+    SwapBuildOutputExactOut,
     SwapBuildCallInput,
     ExactInQueryOutput
-  } from "@balancer/sdk";
-  
-import { Avatar, circlesConfig, Sdk } from "@circles-sdk/sdk";
-import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
+} from "@balancer/sdk";
+
+import { circlesConfig, Sdk } from "@circles-sdk/sdk";
 import { CirclesData, CirclesRpc, TokenBalanceRow } from '@circles-sdk/data';
 
 import pg from "pg"; // @dev pg is a CommonJS module
@@ -46,8 +45,9 @@ import {
 } from "./abi/index.js";
 
 // Algorithm parameters
-const EPSILON = BigInt(1e15);
+const EPSILON = BigInt(1e16);
 const REQUIRE_PRECISION = BigInt(1e15);
+const MIN_EXTRACTABLE_AMOUNT = BigInt(1e18);
 
 // constants 
 const chainId = ChainId.GNOSIS_CHAIN;
@@ -95,6 +95,7 @@ const balancerApi = new BalancerApi(
     "https://api-v3.balancer.fi/",
     chainId
 );
+
 const client = new Client({
     host: postgressqlHost,
     port: postgressqlPort,
@@ -142,9 +143,8 @@ async function checkAllowance(tokenAddress: string, ownerAddress: string, spende
     return allowance;
 }
 
-
 // Fetch the latest price for an individual token (in units of the group token)
-async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean = true, amountOut: bigint = BigInt(1e18)) : Promise<Swap | null> {
+async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean = true, amountOut: bigint = MIN_EXTRACTABLE_AMOUNT) : Promise<Swap | null> {
     const memberToken = new Token(
         chainId,
         tokenAddress as `0x${string}`,
@@ -164,13 +164,13 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
         swapAmount: TokenAmount.fromRawAmount(outToken, amountOut)
     }
 
-    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput);
-
+    const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput).catch(() => {
+        console.error("ERROR: Path not found")
+    });
     // if there is no path, we return null
-    if (sorPaths.length === 0) {
+    if (!sorPaths || sorPaths.length === 0) {
         return null;
     }
-
     // Swap object provides useful helpers for re-querying, building call, etc
     const swap = new Swap({
         chainId,
@@ -179,12 +179,10 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
     });
 
     // @dev We attempt to make this call to validate the swap parameters, ensuring we avoid potential errors such as `BAL#305` or other issues related to swap input parameters.
-    try {
-        await swap.query(rpcUrl) as ExactInQueryOutput;
-    } catch (error: any) {
+    await swap.query(rpcUrl).catch((error: any) => {
         console.error(error?.shortMessage);
         return null;
-    }
+    });
 
     return swap;
 }
@@ -249,12 +247,6 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): 
 }
 
 async function swapUsingBalancer(swap: Swap): Promise<void> {
-    console.log(
-        `Input token: ${swap.inputAmount.token.address}, Amount: ${swap.inputAmount.amount}`
-    );
-    console.log(
-        `Output token: ${swap.outputAmount.token.address}, Amount: ${swap.outputAmount.amount}`
-    );
 
     // Get up to date swap result by querying onchain
     const updated = await swap.query(rpcUrl) as ExactInQueryOutput;
@@ -275,17 +267,26 @@ async function swapUsingBalancer(swap: Swap): Promise<void> {
         recipient: arbBot.address as `0x${string}`,
     };
     
-    const callData = swap.buildCall(buildInput) as SwapBuildOutputExactIn;
+    const callData = swap.buildCall(buildInput) as SwapBuildOutputExactOut;
 
-    try {
-        const txResponse = await wallet.sendTransaction({to: callData.to, data: callData.callData});
-        console.log("Swap tx:", txResponse.hash);
-    } catch (error) {
-        // @todo write to error log
-        console.error("!!! Transaction failed !!!");
-    }    
+    // @dev the last check to make sure that the amountIn is smaller than amountOut - epsilon
+    if (callData.maxAmountIn.amount > swap.outputAmount.amount - EPSILON) return;
+
+    console.log(
+        `
+        Input token: ${swap.inputAmount.token.address}, amountIn: ${callData.maxAmountIn.amount}
+        Output token: ${swap.outputAmount.token.address}, amountOut: ${swap.outputAmount.amount}
+        `
+    );
+
+    await wallet.sendTransaction({to: callData.to, data: callData.callData})
+        .then((txResponse) => {
+            console.log("Swap tx:", txResponse?.hash);   
+        }).catch(() => {
+            console.error("!!! Transaction failed !!!");
+        });
 }
-
+ 
 async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     console.log(`Updating member ${member.address}`);
     const tokenWrapperContract = new Contract(erc20LiftAddress, erc20LiftAbi, wallet);
@@ -306,8 +307,7 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     return member;
 }
 
-async function amountOutGuesser(tokenAddress: string, direction: boolean = true, currentPrice: bigint = BigInt(0), currentAmountOut: bigint = BigInt(1e18)): Promise<GuessAmountOut> {
-    console.log("Checking the best `amountOut`")
+async function amountOutGuesser(tokenAddress: string, direction: boolean = true, currentPrice: bigint = BigInt(0), currentAmountOut: bigint = MIN_EXTRACTABLE_AMOUNT): Promise<GuessAmountOut> {
     const maxAttempts = 100;
     const requiredToken = direction ? tokenAddress : arbBot.groupTokenAddress;
     let bestSwapData: Swap | null = null;
@@ -322,7 +322,7 @@ async function amountOutGuesser(tokenAddress: string, direction: boolean = true,
         if(currentPrice < nextPrice && currentAmountOut > nextPrice) {
             const isExecutable = await requireTokens(requiredToken, nextPrice);
 
-            if(isExecutable) {
+            if(isExecutable && nextPrice + EPSILON < proposedAmountOut) {
                 currentAmountOut = proposedAmountOut;
                 currentPrice = nextPrice;
                 bestSwapData = quote;
@@ -341,34 +341,27 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
     let isProfitable = true;
     let isExecutable = false;
     let tokenIn = arbBot.groupTokenAddress;
-    let tokenOut = member.tokenAddress;
     let amountIn = member.latestPrice ?? BigInt(0);
     let direction = true;
     let swapData = null;
-    let amountOut = BigInt(1e18);
+    let amountOut = MIN_EXTRACTABLE_AMOUNT;
   
     // If there's no price yet or if it's definitely higher than 1e18
-    if (amountIn === BigInt(0) || amountIn > BigInt(1e18) + EPSILON) {
+    if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT + EPSILON) {
+
         direction = false;
         swapData = await fetchBalancerQuote(member.tokenAddress, direction);
         amountIn = swapData?.inputAmount.amount ?? BigInt(0);
 
-        // If the updated quote also exceeds 1e18
-        if (amountIn > BigInt(1e18) + EPSILON) {
-            tokenIn = member.tokenAddress;
-            tokenOut = arbBot.groupTokenAddress;
+        if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT + EPSILON ) {
+            isProfitable = false;
         }
     } 
     // If it's definitely lower than 1e18
-    else if (amountIn < BigInt(1e18) - EPSILON) {
+    else if (amountIn < MIN_EXTRACTABLE_AMOUNT - EPSILON) {
         // we just move forward
         swapData = await fetchBalancerQuote(member.tokenAddress, direction);
-        
-    } 
-    // Otherwise, it's within the epsilon range of 1e18
-    else {
-        isProfitable = false;
-    }
+    }    
     
     // check if bot has enough required CRC for the swap operation
     // find optimal `amountOut`
@@ -383,11 +376,13 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
         }
     }
 
+    amountIn = swapData?.inputAmount.amount ?? BigInt(0);
+    amountOut = swapData?.outputAmount.amount ?? BigInt(0);
+
+    if(amountIn >= amountOut - EPSILON) isProfitable = false;
+
     return {
         isProfitable: isProfitable && isExecutable,
-        tokenIn,
-        tokenOut,
-        amountOut,
         swapData
     };
 }
@@ -503,7 +498,6 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
     if(!balances) return false;
 
     // @todo check if token is from member
-    console.log(`Checking required tokens ${tokenAddress} ${tokenAmount}`);
     // @dev require a bit more tokens to avoid precision issues
     tokenAmount += REQUIRE_PRECISION;
   
@@ -534,7 +528,7 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
         const tokensToMint = lackingAmount - tokensToWrapBalance;
 
         let mintSucceeded = false;
-        if (tokenAddress === arbBot.groupTokenAddress) {
+        if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress.toLocaleLowerCase()) {
             // Mint from members (excluding group address)
             mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
         } else {
@@ -635,7 +629,6 @@ async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalance
 }
 
 async function main() {
-    //await sdkContractRunner.init();
     sdk = new Sdk(wallet, selectedCirclesConfig);
     const botAvatar = await sdk.getAvatar(arbBot.address);
     arbBot = {
@@ -644,9 +637,8 @@ async function main() {
     };
 
     while(true) {
-
         console.log("Loop iteration start");
-        await updateMembersCache(arbBot.groupMembersCache);        
+        await updateMembersCache(arbBot.groupMembersCache);
 
         for(let i = 0; i < arbBot.groupMembersCache.members.length; i++) {
             // @todo prettify

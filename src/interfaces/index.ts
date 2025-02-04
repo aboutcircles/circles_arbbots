@@ -25,9 +25,6 @@ export interface MembersCache {
 
 export interface Deal {
     isProfitable?: boolean;
-    tokenIn: string;
-    tokenOut: string;
-    amountOut: bigint;
     swapData?: Swap | null;
 }
 
