@@ -43,44 +43,97 @@ import {
     inflationaryTokenAbi
 } from "./abi/index.js";
 
-// Algorithm parameters
+/**
+ * @notice Algorithm parameters and global configuration constants.
+ */
+
+// @dev EPSILON represents the minimum profit that we require from a deal.
+// If the expected profit is below this value, the deal is not considered interesting.
 const EPSILON = BigInt(1e16);
+
+// @dev REQUIRE_PRECISION is a small extra token amount added to the required token amount in the `requireTokens` function.
+// This helps mitigate issues related to precision loss during wrapping/unwrapping operations.
 const REQUIRE_PRECISION = BigInt(1e15);
+
+// @dev MIN_EXTRACTABLE_AMOUNT defines the minimum output amount that we are willing to extract on every swap,
+// regardless of the input amount.
 const MIN_EXTRACTABLE_AMOUNT = BigInt(1e18);
 
-// constants 
+/**
+ * @notice Global configuration constants for chain, RPC connection, and bot credentials.
+ */
 const chainId = ChainId.GNOSIS_CHAIN;
 const rpcUrl = process.env.RPC_URL!;
-const botAddress = process.env.ARBBOT_ADDRESS!;
 const botPrivateKey = process.env.PRIVATE_KEY!;
+
+/**
+ * @notice Bot execution parameters.
+ * @dev EXECUTION_PAUSE is the pause duration (in milliseconds) the bot waits if no swaps were executed during an iteration.
+ */
 const EXECUTION_PAUSE = 60000; // 1 minute
-// @dev use ethers v6 big int 
+
+/**
+ * @notice Token approval settings.
+ * @dev MAX_ALLOWANCE_AMOUNT is used when approving tokens for the Balancer vault (i.e. setting the maximum possible allowance).
+ */
 const MAX_ALLOWANCE_AMOUNT = ethers.MaxUint256;
+
+/**
+ * @notice Token type flags.
+ * @dev DemurragedVSInflation indicates that we are interested in inflationary CRC tokens and not demurraged tokens.
+ */
 const DemurragedVSInflation = 1;
 
+/**
+ * @notice PostgreSQL database configuration for retrieving the latest group members.
+ */
 const postgresqlPW = process.env.POSTGRESQL_PW;
 const postgresqlUser = "readonly_user";
 const postgresqlDB = "circles"; 
 const postgressqlHost = "144.76.163.174";
 const postgressqlPort = 5432;
 
+/**
+ * @notice Addresses for group and helper contracts.
+ * @dev groupAddress is the address of the group whose tokens are being extracted.
+ * @dev groupOperatorAddress is the helper contract address used to execute the CRC redeem operation.
+ * @dev groupTokenAddress is the address of the wrapped inflationary ERC20 representation of the group tokens.
+ * @dev erc20LiftAddress is the contract address that wraps ERC1155 tokens into ERC20 tokens.
+ * @dev balancerVaultAddress is the address of the Balancer Vault V2.
+ */
 const groupAddress = process.env.TEST_GROUP_ADDRESS!;
 const groupOperatorAddress = process.env.TEST_GROUP_OPERATOR!;
 const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
 const erc20LiftAddress = process.env.ERC20LIFT_ADDRESS!;
 const balancerVaultAddress = process.env.BALANCER_VAULT_ADDRESS!;
 
-// Initialize relevant objects
+/**
+ * @notice Initializes core blockchain objects.
+ * @dev provider connects to the blockchain via the JSON RPC URL.
+ * @dev wallet is created using the provided bot private key.
+ */
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 const wallet = new Wallet(botPrivateKey, provider);
-const selectedCirclesConfig = circlesConfig[100];
+
+/**
+ * @notice Circles SDK configuration objects.
+ * @dev selectedCirclesConfig contains configuration details for the current chain.
+ * @dev circlesRPC and circlesData are used to interact with the Circles network.
+ * @dev hubV2Contract is the Circles hub contract instance.
+ */
+const selectedCirclesConfig = circlesConfig[chainId];
 const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
 const circlesData = new CirclesData(circlesRPC);
 const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, wallet);
 
+/**
+ * @notice Global bot state.
+ * @dev arbBot stores the bot address, group details, approved tokens, and a cache of group members.
+ * @dev sdk will later hold an instance of the Circles SDK.
+ */
 let
     arbBot: Bot = {
-        address: botAddress,
+        address: wallet.address,
         groupAddress,
         groupTokenAddress,
         approvedTokens: [],
@@ -91,6 +144,9 @@ let
     },
     sdk: Sdk | null;
 
+/**
+ * @notice Balancer API instance used to fetch swap paths and quotes.
+ */
 const balancerApi = new BalancerApi(
     "https://api-v3.balancer.fi/",
     chainId
@@ -104,14 +160,17 @@ const client = new Client({
     password: postgresqlPW,
 });
 //@todo update the naming
-const balancerGroupToken = new Token(
+const groupTokenInstance = new Token(
     chainId,
     arbBot.groupTokenAddress as `0x${string}`,
     18,
     "Group Token"
 );
 
-// Connect the postgresql client
+/**
+ * @notice Connects to the PostgreSQL database and logs the connection status.
+ * @return {Promise<void>}
+ */
 async function connectClient() {
     await client.connect().then(() => {
         console.log("Connected to PostgreSQL database");
@@ -122,7 +181,11 @@ async function connectClient() {
 
 connectClient();
 
-// Helper functions
+/**
+ * @notice Retrieves the latest group members from the PostgreSQL database since a given timestamp.
+ * @param since The UNIX timestamp from which to fetch new group members.
+ * @return {Promise<GroupMember[]>} A promise that resolves to an array of GroupMember objects.
+ */
 async function getLatestGroupMembers(since: number): Promise<GroupMember[]> {
     try {
         const res = await client.query('SELECT "member" AS "address" FROM "V_CrcV2_GroupMemberships" WHERE "group" = $1 AND timestamp > $2', [arbBot.groupAddress, since]);
@@ -133,6 +196,13 @@ async function getLatestGroupMembers(since: number): Promise<GroupMember[]> {
    }
 }
 
+/**
+ * @notice Checks the ERC20 token allowance for a given owner and spender.
+ * @param tokenAddress The ERC20 token contract address.
+ * @param ownerAddress The address owning the tokens.
+ * @param spenderAddress The address allowed to spend the tokens.
+ * @return {Promise<bigint>} A promise that resolves to the allowance as a bigint.
+ */
 async function checkAllowance(tokenAddress: string, ownerAddress: string, spenderAddress: string): Promise<bigint> {
     // Create a contract instance for the token
     const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
@@ -142,7 +212,13 @@ async function checkAllowance(tokenAddress: string, ownerAddress: string, spende
     return allowance;
 }
 
-// Fetch the latest price for an individual token (in units of the group token)
+/**
+ * @notice Fetches the latest Balancer swap quote for a token.
+ * @param tokenAddress The token address to get a quote for.
+ * @param groupToMember If true, swap is from group token to member token; otherwise, from member token to group token.
+ * @param amountOut The output amount for the swap.
+ * @return {Promise<Swap | null>} A promise that resolves to a Swap object if a valid path is found, or null otherwise.
+ */
 async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean = true, amountOut: bigint = MIN_EXTRACTABLE_AMOUNT) : Promise<Swap | null> {
     const memberToken = new Token(
         chainId,
@@ -151,8 +227,8 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
         "Member Token"
     );
 
-    const inToken = groupToMember ? balancerGroupToken : memberToken;
-    const outToken = groupToMember ? memberToken : balancerGroupToken;
+    const inToken = groupToMember ? groupTokenInstance : memberToken;
+    const outToken = groupToMember ? memberToken : groupTokenInstance;
 
     const swapKind = SwapKind.GivenOut;
     const pathInput = {
@@ -164,7 +240,7 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
     }
 
     const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput).catch(() => {
-        console.error("ERROR: Path not found")
+        console.error("ERROR: Swap path not found")
     });
     // if there is no path, we return null
     if (!sorPaths || sorPaths.length === 0) {
@@ -178,15 +254,21 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
     });
 
     // @dev We attempt to make this call to validate the swap parameters, ensuring we avoid potential errors such as `BAL#305` or other issues related to swap input parameters.
-    await swap.query(rpcUrl).catch((error: any) => {
+    const result = await swap.query(rpcUrl).then(() => {
+        return swap;
+    }).catch((error: any) => {
         console.error(error?.shortMessage);
         return null;
     });
 
-    return swap;
+    return result;
 }
 
-// @todo At some point this needs to be updated to some subset of new members, etc. 
+/**
+ * @notice Updates the bot's members cache by fetching new group members from the database.
+ * @param membersCache The current members cache object.
+ * @return {Promise<void>}
+ */
 async function updateMembersCache(membersCache: MembersCache) {
     console.log("Updating members cache...");
 
@@ -196,9 +278,13 @@ async function updateMembersCache(membersCache: MembersCache) {
 
     membersCache.members.push(...newMembers);
     membersCache.lastUpdated = Math.floor(Date.now() / 1000);
-
 }
 
+/**
+ * @notice Retrieves the bot's ERC20 token balance.
+ * @param tokenAddress The address of the ERC20 token.
+ * @return {Promise<bigint>} A promise that resolves to the token balance as a bigint.
+ */
 async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
     // Create a contract instance for the token
     const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
@@ -208,6 +294,11 @@ async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
     return balance;
 }
 
+/**
+ * @notice Mints group tokens using individual token balances by calling the Circles SDK.
+ * @param tokensToMint An array of TokenBalanceRow objects representing the tokens to be minted.
+ * @return {Promise<void>}
+ */
 async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow[]) {
     // We then mint the group tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
     // @todo filter duplications after unwrap
@@ -224,6 +315,11 @@ async function mintGroupTokensFromIndividualTokens(tokensToMint: TokenBalanceRow
     // @todo filter dust amounts
 }
 
+/**
+ * @notice Retrieves the maximum redeemable group token amount for a given member.
+ * @param memberAddress The member's address.
+ * @return {Promise<bigint>} A promise that resolves to the maximum redeemable amount.
+ */
 async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
     const groupTreasuryAddress = await hubV2Contract.treasuries(arbBot.groupAddress);
     const groupTreasuryContract = new Contract(groupTreasuryAddress, groupTreasuryAbi, provider);
@@ -233,6 +329,13 @@ async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
     return balance;
 }
 
+/**
+ * @notice Redeems group tokens for a list of members by calling the group operator contract.
+ * @param memberAddresses An array of member addresses.
+ * @param amounts An array of amounts to redeem corresponding to each member.
+ * @return {Promise<void>}
+ * @throws Will throw an error if the lengths of memberAddresses and amounts do not match.
+ */
 async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): Promise<void> {
     if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
     // @todo check if it is set and do not call it on every redeem
@@ -245,6 +348,11 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): 
     await tx.wait();
 }
 
+/**
+ * @notice Executes a swap on Balancer using the provided Swap object.
+ * @param swap The Swap object containing the swap parameters and paths.
+ * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
+ */
 async function swapUsingBalancer(swap: Swap): Promise<boolean> {
 
     // Get up to date swap result by querying onchain
@@ -294,7 +402,12 @@ async function swapUsingBalancer(swap: Swap): Promise<boolean> {
             return false;
         });
 }
- 
+
+/**
+ * @notice Updates a specific group member's cache data, including token address and latest price.
+ * @param member The group member object to update.
+ * @return {Promise<GroupMember>} A promise that resolves to the updated GroupMember.
+ */
 async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     console.log(`Updating member ${member.address}`);
     const tokenWrapperContract = new Contract(erc20LiftAddress, erc20LiftAbi, wallet);
@@ -316,12 +429,12 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
 }
 
 /**
- * @notice Guesses the optimal swap parameters by progressively increasing the proposed output amount.
- * @param tokenAddress The address of the token for which the swap quote is being fetched.
- * @param direction A boolean indicating the swap direction. If true, the swap is from the token to the group token; if false, vice versa.
- * @param currentPrice The current best input price (in terms of token amount) observed.
- * @param currentAmountOut The current output amount used as the baseline for proposing higher output amounts.
- * @return A Promise that resolves to the best Swap object found that meets the profitability criteria, or null if no improvement is found.
+ * @notice Aggregates the swap parameters to progressively find a better swap quote by increasing the output amount.
+ * @param tokenAddress The token address for which to optimize the swap.
+ * @param direction The swap direction; true for token to group token, false otherwise.
+ * @param currentPrice The current best input price observed.
+ * @param currentAmountOut The current baseline output amount.
+ * @return {Promise<Swap | null>} A promise that resolves to the best Swap object that meets profitability criteria, or null if none is found.
  */
 async function amountOutGuesser(
     tokenAddress: string,
@@ -362,7 +475,7 @@ async function amountOutGuesser(
  * @notice Picks a potential arbitrage deal for a given group member by evaluating swap profitability and executability.
  * @param memberIndex The index of the member in the group members array to evaluate.
  * @param groupMembers An array of group members containing pricing and token information.
- * @return A Promise that resolves to a Deal object containing a flag for profitability/executability and the associated swap data.
+ * @return {Promise<Deal>} A promise that resolves to a Deal object containing flags for profitability/executability and associated swap data.
  */
 async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promise<Deal> {
     const member = groupMembers[memberIndex];
@@ -412,15 +525,24 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
     };
 }
 
-// return true if tokens are converted successfully, or there is enough tokens on the contract
-// return false if it it impossible to get these tokens
+/**
+ * @notice Sums up token balances from an array of TokenBalanceRow objects.
+ * @param balances An array of TokenBalanceRow objects.
+ * @param isStatic If true, sums up the static balance, otherwise the dynamic balance.
+ * @return {bigint} The total summed token balance.
+ */
 function sumBalance(balances: TokenBalanceRow[], isStatic: boolean = true): bigint {
     return balances.reduce((sum, entry) => {
         return isStatic ? sum + BigInt(entry.staticAttoCircles) : sum + BigInt(entry.attoCircles);
     }, BigInt(0));
 }
 
-// Helper to select enough tokens until we reach `tokensNeeded`
+/**
+ * @notice Selects enough token balances from an array until the accumulated amount reaches or exceeds the tokens needed.
+ * @param balances An array of TokenBalanceRow objects.
+ * @param tokensNeeded The required total token amount.
+ * @return {TokenBalanceRow[]} An array of TokenBalanceRow objects that together meet or exceed the tokensNeeded.
+ */
 function gatherTokens(balances: TokenBalanceRow[], tokensNeeded: bigint): TokenBalanceRow[] {
     let accumulatedAmount = BigInt(0);
     const selected: TokenBalanceRow[] = [];
@@ -432,8 +554,12 @@ function gatherTokens(balances: TokenBalanceRow[], tokensNeeded: bigint): TokenB
     }
     return selected;
 }
-  
-// Helper that unwraps a list of token balances
+
+/**
+ * @notice Unwraps a list of token balances by invoking the appropriate unwrapping function on the bot's avatar.
+ * @param tokenList An array of TokenBalanceRow objects to unwrap.
+ * @return {Promise<void>}
+ */
 async function unwrapTokenList(tokenList: TokenBalanceRow[]) {
     console.log("Tokens unwrapping");
     const unwrappingQueue = tokenList.map(async (token) => {
@@ -447,8 +573,10 @@ async function unwrapTokenList(tokenList: TokenBalanceRow[]) {
 }
   
 /**
- * Mint group tokens from members' balances.  
- * Returns `true` if mint succeeded, `false` otherwise.
+ * @notice Mints group tokens from members' balances if sufficient tokens exist.
+ * @param tokensToMint The required number of tokens to mint.
+ * @param balances An array of TokenBalanceRow objects representing available member balances.
+ * @return {Promise<boolean>} A promise that resolves to true if minting is successful, false otherwise.
  */
 async function mintIfPossibleFromMembers(
     tokensToMint: bigint,
@@ -477,8 +605,12 @@ async function mintIfPossibleFromMembers(
 }
   
 /**
- * Mint group tokens from others' balances, then redeem to get inflationary tokens.  
- * Returns `true` if all steps succeeded, `false` otherwise.
+ * @notice Mints group tokens from others' balances, then redeems to obtain inflationary tokens.
+ * @param tokensToMint The required token amount to mint.
+ * @param balances An array of TokenBalanceRow objects representing available balances.
+ * @param avatar The avatar address used in the redemption process.
+ * @param tokenAddress The token address for conversion.
+ * @return {Promise<boolean>} A promise that resolves to true if the full mint & redeem flow succeeds, false otherwise.
  */
 async function mintIfPossibleFromOthers(
     tokensToMint: bigint,
@@ -519,7 +651,7 @@ async function mintIfPossibleFromOthers(
  *         If the current balance is insufficient, attempts to mint or redeem additional tokens.
  * @param tokenAddress The address of the token required.
  * @param tokenAmount The total token amount required (expressed as a bigint).
- * @return A Promise that resolves to true if the required tokens are available or can be acquired, false otherwise.
+ * @return {Promise<boolean>} A promise that resolves to true if the required tokens are available or can be acquired, false otherwise.
  */
 async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise<boolean> {
     if (!arbBot.groupMembersCache) return false;
@@ -579,7 +711,12 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
     return true;
 }
   
-
+/**
+ * @notice Converts an inflationary token amount to its corresponding demurrage-adjusted value.
+ * @param tokenAddress The address of the inflationary token.
+ * @param amount The amount to convert.
+ * @return {Promise<bigint>} A promise that resolves to the converted demurrage value.
+ */
 async function convertInflationaryToDemurrage(tokenAddress: string, amount: bigint): Promise<bigint> {
     // @todo replace with a single onchain view function
     const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, wallet);
@@ -589,7 +726,12 @@ async function convertInflationaryToDemurrage(tokenAddress: string, amount: bigi
     return demurrageValue;
 }
 
-// @dev sort according to the order [group token erc1155 balance, group erc20 balance, ...other balances in DESC order by `staticAttoCircles`
+/**
+ * @notice Sorts an array of token balances, prioritizing group-owned ERC1155 and inflationary tokens,
+ *         and then sorting the rest in descending order by the static token balance.
+ * @param balances An array of TokenBalanceRow objects.
+ * @return {TokenBalanceRow[]} The sorted array of TokenBalanceRow objects.
+ */
 function sortBalances(balances: TokenBalanceRow[]): TokenBalanceRow[] {
     return balances.sort((a, b) => {
         // Check if the tokenOwner is a groupAddress and isErc1155
@@ -621,6 +763,13 @@ function sortBalances(balances: TokenBalanceRow[]): TokenBalanceRow[] {
     });
 }
 
+/**
+ * @notice Approves a specified token for spending by a designated operator.
+ * @param tokenAddress The ERC20 token address.
+ * @param operatorAddress The address to be approved.
+ * @param amount The allowance amount (default is MAX_ALLOWANCE_AMOUNT).
+ * @return {Promise<void>}
+ */
 async function approveTokens(tokenAddress: string, operatorAddress: string, amount: bigint = MAX_ALLOWANCE_AMOUNT) {
     const groupTokenContract = new Contract(tokenAddress, erc20Abi, wallet);
     const approveTx = await groupTokenContract.approve(operatorAddress, amount);
@@ -631,7 +780,7 @@ async function approveTokens(tokenAddress: string, operatorAddress: string, amou
  * @notice Executes an arbitrage deal by ensuring proper token allowances and performing the swap.
  * @param deal The Deal object containing the swap data and profitability flag.
  * @param member The group member associated with the deal (used for context/logging).
- * @return A Promise that resolves to true if the swap is executed successfully, or false otherwise.
+ * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
  */
 async function execDeal(deal: Deal, member: GroupMember): Promise<boolean> {
     if(deal.swapData) {
@@ -650,7 +799,11 @@ async function execDeal(deal: Deal, member: GroupMember): Promise<boolean> {
     return false;
 }
 
-// Main function
+/**
+ * @notice Retrieves the bot's token balances filtered by group membership and sorts them.
+ * @param members An array of group members.
+ * @return {Promise<TokenBalanceRow[]>} A promise that resolves to an array of filtered and sorted TokenBalanceRow objects.
+ */
 async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalanceRow[]> {
     let botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(arbBot.address);
 
@@ -664,10 +817,19 @@ async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalance
     return sortBalances(filteredBalances);
 }
 
+/**
+ * @notice Pauses execution for a specified duration.
+ * @param pauseTime The amount of time in milliseconds to sleep.
+ * @return {Promise<void>} A promise that resolves after the pause time has elapsed.
+ */
 function sleep(pauseTime:number) {
     return new Promise(resolve => setTimeout(resolve, pauseTime));
 }
 
+/**
+ * @notice Main function that initializes the SDK, updates member caches, and continuously attempts arbitrage deals.
+ * @return {Promise<void>} A promise that never resolves unless an unhandled error occurs.
+ */
 async function main() {
     sdk = new Sdk(wallet, selectedCirclesConfig);
     const botAvatar = await sdk.getAvatar(arbBot.address);
