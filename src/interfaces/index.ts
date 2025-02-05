@@ -1,6 +1,5 @@
 import { Swap } from "@balancer/sdk";
 import { Avatar } from '@circles-sdk/sdk';
-import { TokenBalanceRow } from '@circles-sdk/data';
 
 export interface Bot {
     avatar?: Avatar;
@@ -27,22 +26,4 @@ export interface Deal {
     isProfitable?: boolean;
     swapData?: Swap | null;
 }
-
-export interface GuessAmountOut {
-    amountOut: bigint;
-    swapData: Swap | null;
-}
-
-export enum ArbDirection {
-    REDEEM = "REDEEM",
-    GROUP_MINT = "GROUP_MINT",
-}
-
-export type PlaceOrderResult = 
-    | { success: true; orderId: string }
-    | { success: false; error: string };
-
-export type NextPick = 
-    | { member: GroupMember, direction: ArbDirection , swap: Swap }
-    | null;
 
