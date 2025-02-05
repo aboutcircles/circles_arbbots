@@ -44,9 +44,9 @@ import {
 } from "./abi/index.js";
 
 // Algorithm parameters
-const EPSILON = BigInt(1e15);
+const EPSILON = BigInt(1e16);
 const REQUIRE_PRECISION = BigInt(1e15);
-const MIN_EXTRACTABLE_AMOUNT = BigInt(1e17);
+const MIN_EXTRACTABLE_AMOUNT = BigInt(1e18);
 
 // constants 
 const chainId = ChainId.GNOSIS_CHAIN;
@@ -315,7 +315,20 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     return member;
 }
 
-async function amountOutGuesser(tokenAddress: string, direction: boolean = true, currentPrice: bigint = BigInt(0), currentAmountOut: bigint = MIN_EXTRACTABLE_AMOUNT): Promise<Swap | null> {
+/**
+ * @notice Guesses the optimal swap parameters by progressively increasing the proposed output amount.
+ * @param tokenAddress The address of the token for which the swap quote is being fetched.
+ * @param direction A boolean indicating the swap direction. If true, the swap is from the token to the group token; if false, vice versa.
+ * @param currentPrice The current best input price (in terms of token amount) observed.
+ * @param currentAmountOut The current output amount used as the baseline for proposing higher output amounts.
+ * @return A Promise that resolves to the best Swap object found that meets the profitability criteria, or null if no improvement is found.
+ */
+async function amountOutGuesser(
+    tokenAddress: string,
+    direction: boolean = true,
+    currentPrice: bigint = BigInt(0),
+    currentAmountOut: bigint = MIN_EXTRACTABLE_AMOUNT
+  ): Promise<Swap | null> {
     const maxAttempts = 100;
     const requiredToken = direction ? tokenAddress : arbBot.groupTokenAddress;
     let bestSwapData: Swap | null = null;
@@ -333,7 +346,7 @@ async function amountOutGuesser(tokenAddress: string, direction: boolean = true,
             if(isExecutable && nextPrice + EPSILON < proposedAmountOut) {
                 currentAmountOut = proposedAmountOut;
                 currentPrice = nextPrice;
-                // @notice check the best absolute profit value
+                // @notice Check if the absolute profit has improved.
                 if(prevProfit < proposedAmountOut - nextPrice) {
                     bestSwapData = quote;
                     prevProfit = proposedAmountOut - nextPrice;
@@ -343,8 +356,14 @@ async function amountOutGuesser(tokenAddress: string, direction: boolean = true,
     }
 
     return bestSwapData;
-}
+}  
 
+/**
+ * @notice Picks a potential arbitrage deal for a given group member by evaluating swap profitability and executability.
+ * @param memberIndex The index of the member in the group members array to evaluate.
+ * @param groupMembers An array of group members containing pricing and token information.
+ * @return A Promise that resolves to a Deal object containing a flag for profitability/executability and the associated swap data.
+ */
 async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promise<Deal> {
     const member = groupMembers[memberIndex];
     let isProfitable = true;
@@ -355,7 +374,7 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
     let swapData = null;
     let amountOut = MIN_EXTRACTABLE_AMOUNT;
   
-    // If there's no price yet or if it's definitely higher than 1e18
+    // If there's no price yet or if it's higher than the minimum threshold plus precision allowance
     if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT + EPSILON) {
         direction = false;
         swapData = await fetchBalancerQuote(member.tokenAddress, direction);
@@ -366,16 +385,15 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
             isProfitable = false;
         }
     } 
-    // If it's definitely lower than 1e18
+    // If the price is lower than the minimum threshold
     else if (amountIn < MIN_EXTRACTABLE_AMOUNT - EPSILON) {
-        // we just move forward
+        // Proceed with fetching the swap quote in the default direction
         swapData = await fetchBalancerQuote(member.tokenAddress, direction);
     }    
     
-    // check if bot has enough required CRC for the swap operation
-    // find optimal `amountOut`
+    // Check if the bot has enough tokens to execute the swap
     if(isProfitable) {
-        // @todo separate redeem/mint token functionality from the check if the deal is potentially executable
+        // @todo: Separate redeem/mint token functionality from the executability check
         isExecutable = await requireTokens(tokenIn, amountIn);
 
         if(isExecutable) {
@@ -496,7 +514,13 @@ async function mintIfPossibleFromOthers(
     return true;
 }
 
-// @dev `tokenAmount` specified in static CRC
+/**
+ * @notice Ensures that the bot has the required amount of tokens for a swap operation.
+ *         If the current balance is insufficient, attempts to mint or redeem additional tokens.
+ * @param tokenAddress The address of the token required.
+ * @param tokenAmount The total token amount required (expressed as a bigint).
+ * @return A Promise that resolves to true if the required tokens are available or can be acquired, false otherwise.
+ */
 async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise<boolean> {
     if (!arbBot.groupMembersCache) return false;
     const balances = await getBotBalances(arbBot.groupMembersCache.members);
@@ -504,20 +528,20 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
     if(!balances) return false;
 
     // @todo check if token is from member
-    // @dev require a bit more tokens to avoid precision issues
+    // Increase the token amount slightly to account for precision issues.
     tokenAmount += REQUIRE_PRECISION;
 
-    // Current bot's balance
     // @todo replace with the balances array check
+    // Get the current token balance for the bot.
     const initialTokenBalance = await getBotErc20Balance(tokenAddress);
     if (initialTokenBalance >= tokenAmount) {
         return true;
     }
   
-    // We don't have enough in the Bot's balance
+    // Calculate the lacking amount.
     const lackingAmount = tokenAmount - initialTokenBalance;
   
-    // Check how many tokens we already have in "wrappable" form
+    // Retrieve the bot's balance in wrappable form.
     const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
     const avatar = await inflationaryTokenContract.avatar();
   
@@ -529,16 +553,16 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
         tokensToWrapBalance = BigInt(staticBalance[0].staticAttoCircles);
     }
 
-    // If we can't wrap enough from what's already allocated, we need to mint more
+    // If the available wrappable tokens are insufficient, attempt to mint additional tokens.
     if (tokensToWrapBalance < lackingAmount) {
         const tokensToMint = lackingAmount - tokensToWrapBalance;
 
         let mintSucceeded = false;
         if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress.toLocaleLowerCase()) {
-            // Mint from members (excluding group address)
+            // Mint tokens from members excluding the group address.
             mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
         } else {
-            // Mint + redeem flow
+            // Use the mint + redeem flow for other tokens.
             mintSucceeded = await mintIfPossibleFromOthers(tokensToMint, balances, avatar, tokenAddress);
         }
         if (!mintSucceeded) {
@@ -546,8 +570,7 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
         }
     }
   
-    // By now, we should have enough tokens to wrap.  
-    // Convert to 'demurrage' amount just shy of original packaging to avoid overshoot due to precision issues.
+    // Convert the lacking amount to a demurrage-adjusted value to prevent precision overshoots.
     const convertedAmount = await convertInflationaryToDemurrage(tokenAddress, lackingAmount - REQUIRE_PRECISION);
   
     console.log("Wrapping tokens");
@@ -604,18 +627,24 @@ async function approveTokens(tokenAddress: string, operatorAddress: string, amou
     await approveTx.wait();
 }
 
+/**
+ * @notice Executes an arbitrage deal by ensuring proper token allowances and performing the swap.
+ * @param deal The Deal object containing the swap data and profitability flag.
+ * @param member The group member associated with the deal (used for context/logging).
+ * @return A Promise that resolves to true if the swap is executed successfully, or false otherwise.
+ */
 async function execDeal(deal: Deal, member: GroupMember): Promise<boolean> {
     if(deal.swapData) {
         const tokenAddressToApprove = deal.swapData.inputAmount.token.address;
-        // set max allowance if it is not set
+        // If the token has not been approved yet, set the maximum allowance.
         if(!arbBot.approvedTokens.includes(tokenAddressToApprove)) {
             const currentAllowance = await checkAllowance(tokenAddressToApprove, arbBot.address, balancerVaultAddress)
             if (currentAllowance != MAX_ALLOWANCE_AMOUNT)
                 await approveTokens(tokenAddressToApprove, balancerVaultAddress);
-            // Add approved tokens to the list
+            // Add the token to the approved tokens list.
             arbBot.approvedTokens.push(tokenAddressToApprove);
         }
-        // execute swap
+        // Execute the swap using the prepared swap data.
         return await swapUsingBalancer(deal.swapData);
     }
     return false;
@@ -672,7 +701,6 @@ async function main() {
             }
         }
 
-        // @todo pause execution
         if(pauseExecution) {
             console.log("Pause execution")
             await sleep(EXECUTION_PAUSE);
