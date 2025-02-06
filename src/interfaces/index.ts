@@ -27,3 +27,7 @@ export interface Deal {
     swapData?: Swap | null;
 }
 
+export enum ArbDirection {
+    BUY_MEMBER_TOKENS,
+    BUY_GROUP_TOKENS
+}

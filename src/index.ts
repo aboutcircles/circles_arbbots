@@ -27,6 +27,7 @@ import pg from "pg"; // @dev pg is a CommonJS module
 const { Client } = pg;
 
 import {
+    ArbDirection,
     Bot,
     Deal,
     GroupMember,
@@ -219,7 +220,7 @@ async function checkAllowance(tokenAddress: string, ownerAddress: string, spende
  * @param amountOut The output amount for the swap.
  * @return {Promise<Swap | null>} A promise that resolves to a Swap object if a valid path is found, or null otherwise.
  */
-async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean = true, amountOut: bigint = MIN_EXTRACTABLE_AMOUNT) : Promise<Swap | null> {
+async function fetchBalancerQuote(tokenAddress: string, direction: ArbDirection = ArbDirection.BUY_MEMBER_TOKENS, amountOut: bigint = MIN_EXTRACTABLE_AMOUNT) : Promise<Swap | null> {
     const memberToken = new Token(
         chainId,
         tokenAddress as `0x${string}`,
@@ -227,8 +228,8 @@ async function fetchBalancerQuote(tokenAddress: string, groupToMember: boolean =
         "Member Token"
     );
 
-    const inToken = groupToMember ? groupTokenInstance : memberToken;
-    const outToken = groupToMember ? memberToken : groupTokenInstance;
+    const inToken = direction == ArbDirection.BUY_MEMBER_TOKENS ? groupTokenInstance : memberToken;
+    const outToken = direction == ArbDirection.BUY_MEMBER_TOKENS ? memberToken : groupTokenInstance;
 
     const swapKind = SwapKind.GivenOut;
     const pathInput = {
@@ -404,6 +405,57 @@ async function swapUsingBalancer(swap: Swap): Promise<boolean> {
 }
 
 /**
+ * @notice Calculates the total theoretical amount of tokens that could be available,
+ *         combining the bot’s current ERC20 balance, tokens available in wrappable erc1155 form,
+ *         and tokens that could potentially be minted from member balances.
+ * @param tokenAddress The token address for which to compute the theoretical available amount.
+ * @return {Promise<bigint>} A promise that resolves to the total theoretical available token amount.
+ *
+ */
+async function theoreticallyAvailableAmountCRC(tokenAddress: string): Promise<bigint> {
+    tokenAddress = tokenAddress.toLocaleLowerCase();
+
+    if (!arbBot.groupMembersCache) return BigInt(0);
+    const balances = await getBotBalances(arbBot.groupMembersCache.members);
+    if(!balances) return BigInt(0);
+
+    // Get the current erc20 token balance for the bot.
+    const erc20TokenBalance = await getBotErc20Balance(tokenAddress);
+        
+    const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
+    const avatar = (await inflationaryTokenContract.avatar()).toLowerCase();
+    
+    const matchingBalance = balances.find(
+        (balance) => balance.tokenOwner === avatar && balance.isErc1155 === true
+    );
+    // Retrieve the current ERC1155 token balance for the bot.
+    const erc1155TokenBalance = BigInt(matchingBalance?.staticAttoCircles ?? 0);
+  
+
+    let extractableAmonut = BigInt(0);
+    if (tokenAddress === arbBot.groupTokenAddress.toLocaleLowerCase()) {
+        // For group tokens: Sum up all member tokens since they can potentially be converted
+        // into group tokens through the `groupMint` function.
+        const membersTokens = balances.filter(balance => balance.tokenOwner !== arbBot.groupAddress.toLocaleLowerCase());
+        extractableAmonut = sumBalance(membersTokens);
+    } else {
+        // For member tokens: Determine the maximum redeemable amount of tokens from the group vault.
+        // Then, sum all other tokens (including group tokens) that could be converted into ERC1155 group tokens,
+        // and use the lesser of the two amounts.
+        const maxRedeemableTokensAmount = await getMaxRedeemableAmount(avatar);
+        const filteredBalances = balances.filter(balance => balance.tokenOwner !== avatar);
+        const convertableTokensOnBalance = sumBalance(filteredBalances);
+
+        extractableAmonut = maxRedeemableTokensAmount > convertableTokensOnBalance ? convertableTokensOnBalance : maxRedeemableTokensAmount;
+    }
+
+    // The total theoretically available amount is the sum of the ERC20 balance,
+    // the ERC1155 balance, and the mintable/redeemable amount from the group.
+    return erc20TokenBalance + erc1155TokenBalance + extractableAmonut;
+}
+
+
+/**
  * @notice Updates a specific group member's cache data, including token address and latest price.
  * @param member The group member object to update.
  * @return {Promise<GroupMember>} A promise that resolves to the updated GroupMember.
@@ -438,33 +490,31 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
  */
 async function amountOutGuesser(
     tokenAddress: string,
-    direction: boolean = true,
+    direction: ArbDirection = ArbDirection.BUY_MEMBER_TOKENS,
     currentPrice: bigint = BigInt(0),
     currentAmountOut: bigint = MIN_EXTRACTABLE_AMOUNT
   ): Promise<Swap | null> {
     const maxAttempts = 100;
-    const requiredToken = direction ? tokenAddress : arbBot.groupTokenAddress;
     let bestSwapData: Swap | null = null;
     let prevProfit = BigInt(0);
+    // @todo add comments
+    const tokenToCheck = direction == ArbDirection.BUY_MEMBER_TOKENS ? arbBot.groupTokenAddress : tokenAddress;
+    const availableTokensAmount = await theoreticallyAvailableAmountCRC(tokenToCheck);
 
     for(let i = 0; i < maxAttempts; i++) {
         // Propose a new amount by doubling the current amount out.
         const proposedAmountOut = currentAmountOut * 2n;
         const quote = await fetchBalancerQuote(tokenAddress, direction, proposedAmountOut);
         const nextPrice = quote?.inputAmount.amount ?? BigInt(0);
-
-        if(currentPrice < nextPrice) {
-            const isExecutable = await requireTokens(requiredToken, nextPrice);
-
-            if(isExecutable && nextPrice + EPSILON < proposedAmountOut) {
-                currentAmountOut = proposedAmountOut;
-                currentPrice = nextPrice;
-                // @notice Check if the absolute profit has improved.
-                if(prevProfit < proposedAmountOut - nextPrice) {
-                    bestSwapData = quote;
-                    prevProfit = proposedAmountOut - nextPrice;
-                }
-            } else break; // Stop if tokens cannot be acquired.
+        // @todo doublecheck if there is a redundancy
+        if(currentPrice < nextPrice && nextPrice <= availableTokensAmount && nextPrice < proposedAmountOut - EPSILON) {
+            currentAmountOut = proposedAmountOut;
+            currentPrice = nextPrice;
+            // @notice Check if the absolute profit has improved.
+            if(prevProfit < proposedAmountOut - nextPrice) {
+                bestSwapData = quote;
+                prevProfit = proposedAmountOut - nextPrice;
+            }
         } else break; // Exit if no improvement is found.
     }
 
@@ -477,19 +527,17 @@ async function amountOutGuesser(
  * @param groupMembers An array of group members containing pricing and token information.
  * @return {Promise<Deal>} A promise that resolves to a Deal object containing flags for profitability/executability and associated swap data.
  */
-async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promise<Deal> {
-    const member = groupMembers[memberIndex];
+async function pickDeal(member: GroupMember): Promise<Deal> {
     let isProfitable = true;
     let isExecutable = false;
-    let tokenIn = arbBot.groupTokenAddress;
     let amountIn = member.latestPrice ?? BigInt(0);
-    let direction = true;
+    let direction = ArbDirection.BUY_MEMBER_TOKENS;
     let swapData = null;
     let amountOut = MIN_EXTRACTABLE_AMOUNT;
   
     // If there's no price yet or if it's higher than the minimum threshold plus precision allowance
     if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT + EPSILON) {
-        direction = false;
+        direction = ArbDirection.BUY_GROUP_TOKENS;
         swapData = await fetchBalancerQuote(member.tokenAddress, direction);
         amountIn = swapData?.inputAmount.amount ?? BigInt(0);
         amountOut = swapData?.outputAmount.amount ?? BigInt(0);
@@ -506,19 +554,20 @@ async function pickDeal(memberIndex: number, groupMembers: GroupMember[]): Promi
     
     // Check if the bot has enough tokens to execute the swap
     if(isProfitable) {
-        // @todo: Separate redeem/mint token functionality from the executability check
-        isExecutable = await requireTokens(tokenIn, amountIn);
+        const recommendedSwapData = await amountOutGuesser(member.tokenAddress, direction, amountIn);
+        swapData = recommendedSwapData ?? swapData;
 
-        if(isExecutable) {
-            const recommendedSwapData = await amountOutGuesser(member.tokenAddress, direction, amountIn);
-            swapData = recommendedSwapData ?? swapData;
-        }
+        amountIn = swapData?.inputAmount.amount ?? BigInt(0);
+        amountOut = swapData?.outputAmount.amount ?? BigInt(0);
     }
 
-    amountIn = swapData?.inputAmount.amount ?? BigInt(0);
-    amountOut = swapData?.outputAmount.amount ?? BigInt(0);
+    if(amountIn >= amountOut - EPSILON) {
+        isProfitable = false;
+    } else {
+        // @todo pretiffiy this check
+        isExecutable = await requireTokens(swapData?.inputAmount.token.address || "", amountIn);
+    }
 
-    if(amountIn >= amountOut - EPSILON) isProfitable = false;
     return {
         isProfitable: isProfitable && isExecutable,
         swapData
@@ -782,7 +831,7 @@ async function approveTokens(tokenAddress: string, operatorAddress: string, amou
  * @param member The group member associated with the deal (used for context/logging).
  * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
  */
-async function execDeal(deal: Deal, member: GroupMember): Promise<boolean> {
+async function execDeal(deal: Deal): Promise<boolean> {
     if(deal.swapData) {
         const tokenAddressToApprove = deal.swapData.inputAmount.token.address;
         // If the token has not been approved yet, set the maximum allowance.
@@ -848,12 +897,12 @@ async function main() {
             try {
                 await updateMemberCache(arbBot.groupMembersCache.members[i]);
 
-                if (arbBot.groupMembersCache.members[i].latestPrice) {
-
-                    const deal = await pickDeal(i, arbBot.groupMembersCache.members);
+                if (arbBot.groupMembersCache.members[i].latestPrice) { 
+                    const member = arbBot.groupMembersCache.members[i];
+                    const deal = await pickDeal(member);
 
                     if(deal.isProfitable) {
-                        const executionResult = await execDeal(deal, arbBot.groupMembersCache.members[i]);
+                        const executionResult = await execDeal(deal);
                         if(executionResult) pauseExecution = false;
                     }
                 }
