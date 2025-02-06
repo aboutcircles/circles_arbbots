@@ -564,7 +564,7 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
     if(amountIn >= amountOut - EPSILON) {
         isProfitable = false;
     } else {
-        // @todo pretiffiy this check
+        // @todo prettify this check
         isExecutable = await requireTokens(swapData?.inputAmount.token.address || "", amountIn);
     }
 
