@@ -32,6 +32,7 @@ import {
     Deal,
     GroupMember,
     MembersCache,
+    FetchBalancerQuoteParams
 } from "./interfaces/index.js";
 
 // ABI
@@ -86,13 +87,27 @@ const MAX_ALLOWANCE_AMOUNT = ethers.MaxUint256;
 const DemurragedVSInflation = 1;
 
 /**
- * @notice PostgreSQL database configuration for retrieving the latest group members.
+ * @notice PostgreSQL Indexer database configuration for retrieving the latest group members.
  */
 const postgresqlPW = process.env.POSTGRESQL_PW;
 const postgresqlUser = "readonly_user";
 const postgresqlDB = "circles"; 
 const postgressqlHost = "144.76.163.174";
 const postgressqlPort = 5432;
+
+/**
+ * @notice PostgreSQL Logger database configuration for logging bot activity
+ */
+const loggerDBPW = process.env.LOGGERDB_PW;
+const loggerDBUser = "bot";
+const loggerDBDatabase = "bot_activity"; 
+const loggerDBHost = process.env.LOGGERDB_HOST;
+const loggerDBPort = 25060;
+const loggerDBsslmode = "require";
+
+// global flag for logging activity
+const LOG_ACTIVITY = true;
+
 
 /**
  * @notice Addresses for group and helper contracts.
@@ -160,6 +175,16 @@ const client = new Client({
     user: postgresqlUser,
     password: postgresqlPW,
 });
+
+const loggerClient = new Client({
+    host: loggerDBHost,
+    port: loggerDBPort,
+    database: loggerDBDatabase,
+    user: loggerDBUser,
+    password: loggerDBPW,
+    ssl: loggerDBsslmode === "require" ? { rejectUnauthorized: false } : false
+});
+
 //@todo update the naming
 const groupTokenInstance = new Token(
     chainId,
@@ -181,6 +206,21 @@ async function connectClient() {
 }
 
 connectClient();
+
+/**
+ * @notice Connects to the Logger database and logs the connection status.
+ * @return {Promise<void>}
+ */
+async function connectLogging() {
+    if (!LOG_ACTIVITY) return;
+    await loggerClient.connect().then(() => {
+        console.log("Connected to Logger database");
+    }).catch((err) => {
+        console.error("Error connecting to Logger database", err);
+    });
+}
+
+connectLogging();
 
 /**
  * @notice Retrieves the latest group members from the PostgreSQL database since a given timestamp.
@@ -220,7 +260,7 @@ async function checkAllowance(tokenAddress: string, ownerAddress: string, spende
  * @param amountOut The output amount for the swap.
  * @return {Promise<Swap | null>} A promise that resolves to a Swap object if a valid path is found, or null otherwise.
  */
-async function fetchBalancerQuote(tokenAddress: string, direction: ArbDirection = ArbDirection.BUY_MEMBER_TOKENS, amountOut: bigint = MIN_EXTRACTABLE_AMOUNT) : Promise<Swap | null> {
+async function fetchBalancerQuote({tokenAddress, direction = ArbDirection.BUY_MEMBER_TOKENS, amountOut = MIN_EXTRACTABLE_AMOUNT, logQuote = false}: FetchBalancerQuoteParams ) : Promise<Swap | null> {
     const memberToken = new Token(
         chainId,
         tokenAddress as `0x${string}`,
@@ -239,12 +279,18 @@ async function fetchBalancerQuote(tokenAddress: string, direction: ArbDirection 
         swapKind: swapKind,
         swapAmount: TokenAmount.fromRawAmount(outToken, amountOut)
     }
-
     const sorPaths = await balancerApi.sorSwapPaths.fetchSorSwapPaths(pathInput).catch(() => {
         console.error("ERROR: Swap path not found")
     });
+
     // if there is no path, we return null
     if (!sorPaths || sorPaths.length === 0) {
+        if(logQuote) {
+            const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+            const logValues = [Math.floor(Date.now() / 1000), inToken.address, outToken.address, null, amountOut.toString()];
+            await loggerClient.query(logQuery, logValues);
+        }
+        console.log("No path found");
         return null;
     }
     // Swap object provides useful helpers for re-querying, building call, etc
@@ -253,6 +299,12 @@ async function fetchBalancerQuote(tokenAddress: string, direction: ArbDirection 
         paths: sorPaths,
         swapKind
     });
+                // @todo: we're here hardcoding our knowledge of the internals of the fetchBalancerQuote function
+    if (logQuote) {
+        const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+        const logValues = [Math.floor(Date.now() / 1000), inToken.address, outToken.address, swap.inputAmount.amount.toString(), swap.outputAmount.amount.toString()];
+        await loggerClient.query(logQuery, logValues);
+    }
 
     // @dev We attempt to make this call to validate the swap parameters, ensuring we avoid potential errors such as `BAL#305` or other issues related to swap input parameters.
     const result = await swap.query(rpcUrl).then(() => {
@@ -327,6 +379,11 @@ async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
     const groupVaultAddress = await groupTreasuryContract.vaults(arbBot.groupAddress);
 
     const balance = await hubV2Contract.balanceOf(groupVaultAddress, BigInt(memberAddress));
+    if(LOG_ACTIVITY) {
+        const logQuery = `INSERT INTO "collateralrequests" ("timestamp", "groupaddress", "memberaddress", "amount") VALUES (to_timestamp($1), $2, $3, $4, $5, $6)`;
+        const logValues = [Math.floor(Date.now() / 1000), arbBot.groupAddress, memberAddress, balance.toString()];
+        await loggerClient.query(logQuery, logValues);
+    }
     return balance;
 }
 
@@ -471,7 +528,10 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     }
 
     if(member.tokenAddress !== ethers.ZeroAddress && member.tokenAddress) {
-        const quote = await fetchBalancerQuote(member.tokenAddress);
+        const quote = await fetchBalancerQuote({
+            tokenAddress: member.tokenAddress,
+            logQuote: LOG_ACTIVITY
+        });
         if(quote) member.latestPrice = quote!.inputAmount.amount;
         member.latestPrice = quote ? quote.inputAmount.amount : 0n;
         member.lastPriceUpdate = Math.floor(Date.now() / 1000);
@@ -499,12 +559,17 @@ async function amountOutGuesser(
     let prevProfit = BigInt(0);
     // @todo add comments
     const tokenToCheck = direction == ArbDirection.BUY_MEMBER_TOKENS ? arbBot.groupTokenAddress : tokenAddress;
+    const directionString = direction == ArbDirection.BUY_MEMBER_TOKENS ? "group to member" : "member to group";
     const availableTokensAmount = await theoreticallyAvailableAmountCRC(tokenToCheck);
 
     for(let i = 0; i < maxAttempts; i++) {
         // Propose a new amount by doubling the current amount out.
         const proposedAmountOut = currentAmountOut * 2n;
-        const quote = await fetchBalancerQuote(tokenAddress, direction, proposedAmountOut);
+        const quote = await fetchBalancerQuote({
+            tokenAddress: tokenAddress, 
+            direction: direction, 
+            amountOut: proposedAmountOut
+        });
         const nextPrice = quote?.inputAmount.amount ?? BigInt(0);
         // @todo doublecheck if there is a redundancy
         if(currentPrice < nextPrice && nextPrice <= availableTokensAmount && nextPrice < proposedAmountOut - EPSILON) {
@@ -538,10 +603,13 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
     // If there's no price yet or if it's higher than the minimum threshold plus precision allowance
     if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT + EPSILON) {
         direction = ArbDirection.BUY_GROUP_TOKENS;
-        swapData = await fetchBalancerQuote(member.tokenAddress, direction);
+        swapData = await fetchBalancerQuote({
+            tokenAddress: member.tokenAddress, 
+            direction: direction,
+            logQuote: LOG_ACTIVITY
+        });
         amountIn = swapData?.inputAmount.amount ?? BigInt(0);
         amountOut = swapData?.outputAmount.amount ?? BigInt(0);
-
         if (amountIn === BigInt(0) || amountIn > amountOut - EPSILON ) {
             isProfitable = false;
         }
@@ -549,7 +617,10 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
     // If the price is lower than the minimum threshold
     else if (amountIn < MIN_EXTRACTABLE_AMOUNT - EPSILON) {
         // Proceed with fetching the swap quote in the default direction
-        swapData = await fetchBalancerQuote(member.tokenAddress, direction);
+        swapData = await fetchBalancerQuote({
+            tokenAddress: member.tokenAddress, 
+            direction: direction
+        });
     }    
     
     // Check if the bot has enough tokens to execute the swap
@@ -900,8 +971,13 @@ async function main() {
                 if (arbBot.groupMembersCache.members[i].latestPrice) { 
                     const member = arbBot.groupMembersCache.members[i];
                     const deal = await pickDeal(member);
-
                     if(deal.isProfitable) {
+                        if (LOG_ACTIVITY) {
+                            const dealData = deal.swapData;
+                            const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+                            const logValues = [Math.floor(Date.now() / 1000), dealData?.inputAmount.token.address, dealData?.outputAmount.token.address, dealData?.inputAmount.amount.toString(), dealData?.outputAmount.amount.toString()];
+                            await loggerClient.query(logQuery, logValues);
+                        }
                         const executionResult = await execDeal(deal);
                         if(executionResult) pauseExecution = false;
                     }

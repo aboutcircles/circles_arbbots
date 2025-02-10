@@ -31,3 +31,9 @@ export enum ArbDirection {
     BUY_MEMBER_TOKENS,
     BUY_GROUP_TOKENS
 }
+export interface FetchBalancerQuoteParams {
+    tokenAddress: string;
+    direction?: ArbDirection;
+    amountOut?: bigint;
+    logQuote?: boolean;
+}
