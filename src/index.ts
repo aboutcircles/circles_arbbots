@@ -111,13 +111,11 @@ const LOG_ACTIVITY = true;
 
 /**
  * @notice Addresses for group and helper contracts.
- * @dev groupAddress is the address of the group whose tokens are being extracted.
  * @dev groupOperatorAddress is the helper contract address used to execute the CRC redeem operation.
  * @dev groupTokenAddress is the address of the wrapped inflationary ERC20 representation of the group tokens.
  * @dev erc20LiftAddress is the contract address that wraps ERC1155 tokens into ERC20 tokens.
  * @dev balancerVaultAddress is the address of the Balancer Vault V2.
  */
-const groupAddress = process.env.TEST_GROUP_ADDRESS!;
 const groupOperatorAddress = process.env.TEST_GROUP_OPERATOR!;
 const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
 const erc20LiftAddress = process.env.ERC20LIFT_ADDRESS!;
@@ -150,7 +148,6 @@ const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi,
 let
     arbBot: Bot = {
         address: wallet.address,
-        groupAddress,
         groupTokenAddress,
         approvedTokens: [],
         groupMembersCache: {
@@ -317,6 +314,12 @@ async function fetchBalancerQuote({tokenAddress, direction = ArbDirection.BUY_ME
     return result;
 }
 
+async function getERC20TokenAvatar(tokenAddress: string): Promise<string> {
+    const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
+    const avatar = (await inflationaryTokenContract.avatar()).toLowerCase();
+    return avatar;
+}
+
 /**
  * @notice Updates the bot's members cache by fetching new group members from the database.
  * @param membersCache The current members cache object.
@@ -479,11 +482,10 @@ async function theoreticallyAvailableAmountCRC(tokenAddress: string): Promise<bi
     // Get the current erc20 token balance for the bot.
     const erc20TokenBalance = await getBotErc20Balance(tokenAddress);
         
-    const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
-    const avatar = (await inflationaryTokenContract.avatar()).toLowerCase();
+    const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
     
     const matchingBalance = balances.find(
-        (balance) => balance.tokenOwner === avatar && balance.isErc1155 === true
+        (balance) => balance.tokenOwner === tokenAvatar && balance.isErc1155 === true
     );
     // Retrieve the current ERC1155 token balance for the bot.
     const erc1155TokenBalance = BigInt(matchingBalance?.staticAttoCircles ?? 0);
@@ -493,14 +495,14 @@ async function theoreticallyAvailableAmountCRC(tokenAddress: string): Promise<bi
     if (tokenAddress === arbBot.groupTokenAddress.toLocaleLowerCase()) {
         // For group tokens: Sum up all member tokens since they can potentially be converted
         // into group tokens through the `groupMint` function.
-        const membersTokens = balances.filter(balance => balance.tokenOwner !== arbBot.groupAddress.toLocaleLowerCase());
+        const membersTokens = balances.filter(balance => balance.tokenOwner !== arbBot.groupAddress);
         extractableAmonut = sumBalance(membersTokens);
     } else {
         // For member tokens: Determine the maximum redeemable amount of tokens from the group vault.
         // Then, sum all other tokens (including group tokens) that could be converted into ERC1155 group tokens,
         // and use the lesser of the two amounts.
-        const maxRedeemableTokensAmount = await getMaxRedeemableAmount(avatar);
-        const filteredBalances = balances.filter(balance => balance.tokenOwner !== avatar);
+        const maxRedeemableTokensAmount = await getMaxRedeemableAmount(tokenAvatar);
+        const filteredBalances = balances.filter(balance => balance.tokenOwner !== tokenAvatar);
         const convertableTokensOnBalance = sumBalance(filteredBalances);
 
         extractableAmonut = maxRedeemableTokensAmount > convertableTokensOnBalance ? convertableTokensOnBalance : maxRedeemableTokensAmount;
@@ -794,11 +796,10 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
     const lackingAmount = tokenAmount - initialTokenBalance;
   
     // Retrieve the bot's balance in wrappable form.
-    const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
-    const avatar = await inflationaryTokenContract.avatar();
+    const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
   
     const staticBalance = balances.filter(
-        balance => avatar.toLowerCase() === balance.tokenOwner && balance.isErc1155 === true
+        balance => tokenAvatar.toLowerCase() === balance.tokenOwner && balance.isErc1155 === true
     );
     let tokensToWrapBalance = BigInt(0);
     if (staticBalance.length) {
@@ -815,7 +816,7 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
             mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
         } else {
             // Use the mint + redeem flow for other tokens.
-            mintSucceeded = await mintIfPossibleFromOthers(tokensToMint, balances, avatar, tokenAddress);
+            mintSucceeded = await mintIfPossibleFromOthers(tokensToMint, balances, tokenAvatar, tokenAddress);
         }
         if (!mintSucceeded) {
             return false;
@@ -826,7 +827,7 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
     const convertedAmount = await convertInflationaryToDemurrage(tokenAddress, lackingAmount - REQUIRE_PRECISION);
   
     console.log("Wrapping tokens");
-    await arbBot.avatar.wrapInflationErc20(avatar, convertedAmount);
+    await arbBot.avatar.wrapInflationErc20(tokenAvatar, convertedAmount);
   
     return true;
 }
@@ -928,7 +929,8 @@ async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalance
     let botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(arbBot.address);
 
     let memberAddresses = new Set(members.map(member => member.address.toLowerCase()));
-    memberAddresses.add(arbBot.groupAddress);
+    if(arbBot.groupAddress)
+        memberAddresses.add(arbBot.groupAddress);
 
     const filteredBalances = botBalances.filter(token =>
         memberAddresses.has(token.tokenOwner.toLowerCase()) && token.version === 2
@@ -955,7 +957,8 @@ async function main() {
     const botAvatar = await sdk.getAvatar(arbBot.address);
     arbBot = {
         ...arbBot,
-        avatar: botAvatar
+        avatar: botAvatar,
+        groupAddress: await getERC20TokenAvatar(arbBot.groupTokenAddress),
     };
 
     while(true) {
