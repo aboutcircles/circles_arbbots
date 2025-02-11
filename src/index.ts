@@ -41,7 +41,7 @@ import {
     erc20Abi,
     hubV2Abi,
     erc20LiftAbi,
-    superGroupOperatorAbi,
+    groupContractAbi,
     inflationaryTokenAbi
 } from "./abi/index.js";
 
@@ -105,19 +105,19 @@ const loggerDBHost = process.env.LOGGERDB_HOST;
 const loggerDBPort = 25060;
 const loggerDBsslmode = "require";
 
+const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+
 // global flag for logging activity
 const LOG_ACTIVITY = true;
 
 
 /**
  * @notice Addresses for group and helper contracts.
- * @dev groupOperatorAddress is the helper contract address used to execute the CRC redeem operation.
- * @dev groupTokenAddress is the address of the wrapped inflationary ERC20 representation of the group tokens.
+ * @dev groupAddress is the address of the group.
  * @dev erc20LiftAddress is the contract address that wraps ERC1155 tokens into ERC20 tokens.
  * @dev balancerVaultAddress is the address of the Balancer Vault V2.
  */
-const groupOperatorAddress = process.env.TEST_GROUP_OPERATOR!;
-const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
+const groupAddress = process.env.TEST_GROUP_ADDRESS!.toLowerCase();
 const erc20LiftAddress = process.env.ERC20LIFT_ADDRESS!;
 const balancerVaultAddress = process.env.BALANCER_VAULT_ADDRESS!;
 
@@ -148,7 +148,7 @@ const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi,
 let
     arbBot: Bot = {
         address: wallet.address,
-        groupTokenAddress,
+        groupAddress,
         approvedTokens: [],
         groupMembersCache: {
             lastUpdated: 0,
@@ -181,14 +181,6 @@ const loggerClient = new Client({
     password: loggerDBPW,
     ssl: loggerDBsslmode === "require" ? { rejectUnauthorized: false } : false
 });
-
-//@todo update the naming
-const groupTokenInstance = new Token(
-    chainId,
-    arbBot.groupTokenAddress as `0x${string}`,
-    18,
-    "Group Token"
-);
 
 /**
  * @notice Connects to the PostgreSQL database and logs the connection status.
@@ -258,6 +250,14 @@ async function checkAllowance(tokenAddress: string, ownerAddress: string, spende
  * @return {Promise<Swap | null>} A promise that resolves to a Swap object if a valid path is found, or null otherwise.
  */
 async function fetchBalancerQuote({tokenAddress, direction = ArbDirection.BUY_MEMBER_TOKENS, amountOut = MIN_EXTRACTABLE_AMOUNT, logQuote = false}: FetchBalancerQuoteParams ) : Promise<Swap | null> {
+    // @todo move to global var
+    const groupTokenInstance = new Token(
+        chainId,
+        arbBot.groupTokenAddress as `0x${string}`,
+        18,
+        "Group Token"
+    );
+
     const memberToken = new Token(
         chainId,
         tokenAddress as `0x${string}`,
@@ -283,7 +283,6 @@ async function fetchBalancerQuote({tokenAddress, direction = ArbDirection.BUY_ME
     // if there is no path, we return null
     if (!sorPaths || sorPaths.length === 0) {
         if(logQuote) {
-            const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
             const logValues = [Math.floor(Date.now() / 1000), inToken.address, outToken.address, null, amountOut.toString()];
             await loggerClient.query(logQuery, logValues);
         }
@@ -298,7 +297,6 @@ async function fetchBalancerQuote({tokenAddress, direction = ArbDirection.BUY_ME
     });
                 // @todo: we're here hardcoding our knowledge of the internals of the fetchBalancerQuote function
     if (logQuote) {
-        const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
         const logValues = [Math.floor(Date.now() / 1000), inToken.address, outToken.address, swap.inputAmount.amount.toString(), swap.outputAmount.amount.toString()];
         await loggerClient.query(logQuery, logValues);
     }
@@ -316,8 +314,23 @@ async function fetchBalancerQuote({tokenAddress, direction = ArbDirection.BUY_ME
 
 async function getERC20TokenAvatar(tokenAddress: string): Promise<string> {
     const inflationaryTokenContract = new Contract(tokenAddress, inflationaryTokenAbi, provider);
-    const avatar = (await inflationaryTokenContract.avatar()).toLowerCase();
-    return avatar;
+    const avatar = await inflationaryTokenContract.avatar();
+
+    return avatar.toLowerCase();
+}
+
+async function getERC20Token(avatarAddress: string): Promise<string> {
+    const tokenWrapperContract = new Contract(erc20LiftAddress, erc20LiftAbi, provider);
+    const tokenAddress = await tokenWrapperContract.erc20Circles(DemurragedVSInflation, avatarAddress);
+
+    return tokenAddress.toLowerCase();
+}
+
+async function getRedeemOperator(groupAddress: string): Promise<string> {
+    const groupContract = new Contract(groupAddress, groupContractAbi, provider);
+    const redemptionOperatorAddress = await groupContract.redemptionHandler();
+
+    return redemptionOperatorAddress.toLowerCase();
 }
 
 /**
@@ -397,16 +410,18 @@ async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
  * @return {Promise<void>}
  * @throws Will throw an error if the lengths of memberAddresses and amounts do not match.
  */
-async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): Promise<void> {
+async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
     if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
     // @todo check if it is set and do not call it on every redeem
-    let tx = await hubV2Contract.setApprovalForAll(groupOperatorAddress, true);
+    let tx = await hubV2Contract.setApprovalForAll(arbBot.groupRedeemOperator, true);
     await tx.wait();
     
-    const memberAddressesToBigNumber = memberAddresses.map(memberAddress => BigInt(memberAddress))
-    const superGroupOperatorContract = new Contract(groupOperatorAddress, superGroupOperatorAbi, wallet);
-    tx = await superGroupOperatorContract.redeem(arbBot.groupAddress, memberAddressesToBigNumber, amounts);
-    await tx.wait();
+    const memberAddressesToBigNumber = memberAddresses.map(memberAddress => BigInt(memberAddress));
+    if(arbBot.groupRedeemOperator) {
+        const superGroupOperatorContract = new Contract(arbBot.groupRedeemOperator, groupContractAbi, wallet);
+        tx = await superGroupOperatorContract.redeem(arbBot.groupAddress, memberAddressesToBigNumber, amounts);
+        await tx.wait();
+    }
 }
 
 /**
@@ -414,7 +429,7 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]): 
  * @param swap The Swap object containing the swap parameters and paths.
  * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
  */
-async function swapUsingBalancer(swap: Swap): Promise<boolean> {
+async function swapUsingBalancer(swap: Swap, attempt: number = 1): Promise<boolean> {
 
     // Get up to date swap result by querying onchain
     const updated = await swap.query(rpcUrl) as ExactInQueryOutput;
@@ -456,8 +471,11 @@ async function swapUsingBalancer(swap: Swap): Promise<boolean> {
             console.error("!!! Transaction failed !!!");
             // @notice if tx fails we check if we have enough required tokens, 
             // the `swap.inputAmount.amount` and `callData.maxAmountIn.amount` values might differ significantly
-            if(callData.maxAmountIn.amount > swap.inputAmount.amount) {
+            
+            if(callData.maxAmountIn.amount > swap.inputAmount.amount && attempt != 0) {
+                console.log("Second swap attempt");
                 await requireTokens(swap.inputAmount.token.address, callData.maxAmountIn.amount);
+                return await swapUsingBalancer(swap, 0);
             }
 
             return false;
@@ -472,7 +490,8 @@ async function swapUsingBalancer(swap: Swap): Promise<boolean> {
  * @return {Promise<bigint>} A promise that resolves to the total theoretical available token amount.
  *
  */
-async function theoreticallyAvailableAmountCRC(tokenAddress: string): Promise<bigint> {
+async function theoreticallyAvailableAmountCRC(tokenAddress: string | undefined): Promise<bigint> {
+    if(!tokenAddress) return BigInt(0);
     tokenAddress = tokenAddress.toLocaleLowerCase();
 
     if (!arbBot.groupMembersCache) return BigInt(0);
@@ -492,7 +511,7 @@ async function theoreticallyAvailableAmountCRC(tokenAddress: string): Promise<bi
   
 
     let extractableAmonut = BigInt(0);
-    if (tokenAddress === arbBot.groupTokenAddress.toLocaleLowerCase()) {
+    if (tokenAddress === arbBot.groupTokenAddress) {
         // For group tokens: Sum up all member tokens since they can potentially be converted
         // into group tokens through the `groupMint` function.
         const membersTokens = balances.filter(balance => balance.tokenOwner !== arbBot.groupAddress);
@@ -811,7 +830,7 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
         const tokensToMint = lackingAmount - tokensToWrapBalance;
 
         let mintSucceeded = false;
-        if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress.toLocaleLowerCase()) {
+        if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress) {
             // Mint tokens from members excluding the group address.
             mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
         } else {
@@ -958,9 +977,9 @@ async function main() {
     arbBot = {
         ...arbBot,
         avatar: botAvatar,
-        groupAddress: await getERC20TokenAvatar(arbBot.groupTokenAddress),
+        groupTokenAddress: await getERC20Token(arbBot.groupAddress),
+        groupRedeemOperator: await getRedeemOperator(arbBot.groupAddress)
     };
-
     while(true) {
         let pauseExecution = true;
         console.log("Loop start");
@@ -977,7 +996,7 @@ async function main() {
                     if(deal.isProfitable) {
                         if (LOG_ACTIVITY) {
                             const dealData = deal.swapData;
-                            const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+                            
                             const logValues = [Math.floor(Date.now() / 1000), dealData?.inputAmount.token.address, dealData?.outputAmount.token.address, dealData?.inputAmount.amount.toString(), dealData?.outputAmount.amount.toString()];
                             await loggerClient.query(logQuery, logValues);
                         }

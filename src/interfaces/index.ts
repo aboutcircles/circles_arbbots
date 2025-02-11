@@ -3,10 +3,11 @@ import { Avatar } from '@circles-sdk/sdk';
 
 export interface Bot {
     avatar?: Avatar;
-    groupAddress?: string;
+    groupTokenAddress?: string;
+    groupRedeemOperator?: string;
+    groupAddress: string;
     groupMembersCache: MembersCache;
     address: string;
-    groupTokenAddress: string;
     approvedTokens: string[]
 }
 
