@@ -957,6 +957,7 @@ async function main() {
         ...arbBot,
         avatar: botAvatar
     };
+    console.log("initiating bot with parameters", arbBot);
 
     while(true) {
         let pauseExecution = true;
