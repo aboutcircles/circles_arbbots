@@ -6,8 +6,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "start": "npm run build && pm2 start ecosystem.config.cjs",
-    "start:nodaemon": "npm run build && pm2 start dist/index.js --no-daemon",
-    "start:dev": "ts-node index.ts"
+    "start:nodaemon": "npm run build && pm2 start ecosystem.config.cjs --no-daemon",
+    "start:dev": "ts-node src/index.ts"
   },
   "keywords": [],
   "author": "",

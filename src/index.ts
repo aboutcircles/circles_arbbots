@@ -983,6 +983,8 @@ async function main() {
         groupTokenAddress: await getERC20Token(arbBot.groupAddress),
         groupRedeemOperator: await getRedeemOperator(arbBot.groupAddress)
     };
+    console.log("initiating bot with parameters", arbBot);
+
     while(true) {
         let pauseExecution = true;
         console.log("Loop start");
