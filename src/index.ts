@@ -117,9 +117,9 @@ const LOG_ACTIVITY = true;
  * @dev erc20LiftAddress is the contract address that wraps ERC1155 tokens into ERC20 tokens.
  * @dev balancerVaultAddress is the address of the Balancer Vault V2.
  */
-const groupAddress = process.env.TEST_GROUP_ADDRESS!;
-const groupOperatorAddress = process.env.TEST_GROUP_OPERATOR!;
-const groupTokenAddress = process.env.TEST_GROUP_ERC20_TOKEN!;
+const groupAddress = process.env.GROUP_ADDRESS!;
+const groupOperatorAddress = process.env.GROUP_OPERATOR!;
+const groupTokenAddress = process.env.GROUP_ERC20_TOKEN!;
 const erc20LiftAddress = process.env.ERC20LIFT_ADDRESS!;
 const balancerVaultAddress = process.env.BALANCER_VAULT_ADDRESS!;
 
