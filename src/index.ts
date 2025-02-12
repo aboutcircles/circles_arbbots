@@ -37,6 +37,7 @@ import {
 
 // ABI
 import {
+    groupRedeemAbi,
     groupTreasuryAbi,
     erc20Abi,
     hubV2Abi,
@@ -117,7 +118,7 @@ const LOG_ACTIVITY = true;
  * @dev erc20LiftAddress is the contract address that wraps ERC1155 tokens into ERC20 tokens.
  * @dev balancerVaultAddress is the address of the Balancer Vault V2.
  */
-const groupAddress = process.env.TEST_GROUP_ADDRESS!.toLowerCase();
+const groupAddress = process.env.TEST_GROUP_ADDRESS!;
 const erc20LiftAddress = process.env.ERC20LIFT_ADDRESS!;
 const balancerVaultAddress = process.env.BALANCER_VAULT_ADDRESS!;
 
@@ -148,7 +149,7 @@ const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi,
 let
     arbBot: Bot = {
         address: wallet.address,
-        groupAddress,
+        groupAddress: groupAddress.toLowerCase(),
         approvedTokens: [],
         groupMembersCache: {
             lastUpdated: 0,
@@ -216,9 +217,10 @@ connectLogging();
  * @param since The UNIX timestamp from which to fetch new group members.
  * @return {Promise<GroupMember[]>} A promise that resolves to an array of GroupMember objects.
  */
-async function getLatestGroupMembers(since: number): Promise<GroupMember[]> {
+async function getGroupMembers(): Promise<GroupMember[]> {
+    const currentUNIXTime = Math.floor(Date.now() / 1000);
     try {
-        const res = await client.query('SELECT "member" AS "address" FROM "V_CrcV2_GroupMemberships" WHERE "group" = $1 AND timestamp > $2', [arbBot.groupAddress, since]);
+        const res = await client.query('SELECT "member" AS "address" FROM "V_CrcV2_GroupMemberships" WHERE "group" = $1 AND "expiryTime" > $2', [arbBot.groupAddress, currentUNIXTime]);
         return res.rows as GroupMember[];
     } catch (err) {
         console.error('Error running query', err);
@@ -343,9 +345,9 @@ async function updateMembersCache(membersCache: MembersCache) {
 
     // We fetch the latest members from the database
     console.log("Fetching latest members...");
-    const newMembers = await getLatestGroupMembers(membersCache.lastUpdated);
+    const newMembers = await getGroupMembers();
 
-    membersCache.members.push(...newMembers);
+    membersCache.members = newMembers;
     membersCache.lastUpdated = Math.floor(Date.now() / 1000);
 }
 
@@ -396,7 +398,7 @@ async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
 
     const balance = await hubV2Contract.balanceOf(groupVaultAddress, BigInt(memberAddress));
     if(LOG_ACTIVITY) {
-        const logQuery = `INSERT INTO "collateralrequests" ("timestamp", "groupaddress", "memberaddress", "amount") VALUES (to_timestamp($1), $2, $3, $4, $5, $6)`;
+        const logQuery = `INSERT INTO "collateralrequests" ("timestamp", "groupaddress", "memberaddress", "amount") VALUES (to_timestamp($1), $2, $3, $4)`;
         const logValues = [Math.floor(Date.now() / 1000), arbBot.groupAddress, memberAddress, balance.toString()];
         await loggerClient.query(logQuery, logValues);
     }
@@ -418,8 +420,8 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
     
     const memberAddressesToBigNumber = memberAddresses.map(memberAddress => BigInt(memberAddress));
     if(arbBot.groupRedeemOperator) {
-        const superGroupOperatorContract = new Contract(arbBot.groupRedeemOperator, groupContractAbi, wallet);
-        tx = await superGroupOperatorContract.redeem(arbBot.groupAddress, memberAddressesToBigNumber, amounts);
+        const groupOperatorContract = new Contract(arbBot.groupRedeemOperator, groupRedeemAbi, wallet);
+        tx = await groupOperatorContract.redeem(arbBot.groupAddress, memberAddressesToBigNumber, amounts);
         await tx.wait();
     }
 }
@@ -832,6 +834,7 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
         let mintSucceeded = false;
         if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress) {
             // Mint tokens from members excluding the group address.
+            // @todo update naming
             mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
         } else {
             // Use the mint + redeem flow for other tokens.
