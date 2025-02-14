@@ -83,7 +83,7 @@ export const groupTreasuryAbi = [
     }
 ];
 
-export const superGroupOperatorAbi = [
+export const groupRedeemAbi = [
     {
         constant: false,
         inputs: [
@@ -96,7 +96,23 @@ export const superGroupOperatorAbi = [
         payable: false,
         stateMutability: "nonpayable",
         type: "function"
-    }    
+    }
+];
+
+export const groupContractAbi = [
+    {
+        type: "function",
+        name: "redemptionHandler",
+        inputs: [],
+        outputs: [
+            {
+                name: "",
+                type: "address",
+                internalType:"address"
+            }
+        ],
+        stateMutability: "view"
+    }
 ];
 
 export const erc20LiftAbi = [
