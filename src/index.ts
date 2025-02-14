@@ -52,7 +52,7 @@ import {
 
 // @dev EPSILON represents the minimum profit that we require from a deal.
 // If the expected profit is below this value, the deal is not considered interesting.
-const EPSILON = BigInt(1e16);
+const EPSILON = BigInt(1e15);
 
 // @dev REQUIRE_PRECISION is a small extra token amount added to the required token amount in the `requireTokens` function.
 // This helps mitigate issues related to precision loss during wrapping/unwrapping operations.
@@ -60,7 +60,7 @@ const REQUIRE_PRECISION = BigInt(1e15);
 
 // @dev MIN_EXTRACTABLE_AMOUNT defines the minimum output amount that we are willing to extract on every swap,
 // regardless of the input amount.
-const MIN_EXTRACTABLE_AMOUNT = BigInt(1e18);
+const MIN_EXTRACTABLE_AMOUNT = BigInt(1e17);
 
 /**
  * @notice Global configuration constants for chain, RPC connection, and bot credentials.
