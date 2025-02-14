@@ -380,7 +380,7 @@ async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
 
     const balance = await hubV2Contract.balanceOf(groupVaultAddress, BigInt(memberAddress));
     if(LOG_ACTIVITY) {
-        const logQuery = `INSERT INTO "collateralrequests" ("timestamp", "groupaddress", "memberaddress", "amount") VALUES (to_timestamp($1), $2, $3, $4, $5, $6)`;
+        const logQuery = `INSERT INTO "collateralrequests" ("timestamp", "groupaddress", "memberaddress", "amount") VALUES (to_timestamp($1), $2, $3, $4)`;
         const logValues = [Math.floor(Date.now() / 1000), arbBot.groupAddress, memberAddress, balance.toString()];
         await loggerClient.query(logQuery, logValues);
     }
