@@ -66,7 +66,7 @@ const MIN_EXTRACTABLE_AMOUNT = BigInt(1e17);
  * @notice Global configuration constants for chain, RPC connection, and bot credentials.
  */
 const chainId = ChainId.GNOSIS_CHAIN;
-const rpcUrl = process.env.RPC_URL!;
+const rpcUrl = "https://rpc.ankr.com/gnosis";
 const botPrivateKey = process.env.PRIVATE_KEY!;
 
 /**
@@ -102,7 +102,7 @@ const postgressqlPort = 5432;
 const loggerDBPW = process.env.LOGGERDB_PW;
 const loggerDBUser = "bot";
 const loggerDBDatabase = "bot_activity"; 
-const loggerDBHost = process.env.LOGGERDB_HOST;
+const loggerDBHost = "db-postgresql-fra1-54201-do-user-1252164-0.h.db.ondigitalocean.com";
 const loggerDBPort = 25060;
 const loggerDBsslmode = "require";
 
@@ -118,9 +118,9 @@ const LOG_ACTIVITY = true;
  * @dev erc20LiftAddress is the contract address that wraps ERC1155 tokens into ERC20 tokens.
  * @dev balancerVaultAddress is the address of the Balancer Vault V2.
  */
-const groupAddress = process.env.TEST_GROUP_ADDRESS!;
-const erc20LiftAddress = process.env.ERC20LIFT_ADDRESS!;
-const balancerVaultAddress = process.env.BALANCER_VAULT_ADDRESS!;
+const groupAddress = process.env.GROUP_ADDRESS!;
+const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
+const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
 
 /**
  * @notice Initializes core blockchain objects.
