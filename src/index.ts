@@ -119,6 +119,7 @@ const LOG_ACTIVITY = true;
  * @dev balancerVaultAddress is the address of the Balancer Vault V2.
  */
 const groupAddress = process.env.GROUP_ADDRESS!;
+const redemptionOperatorAddress = process.env.REDEMPTION_OPERATOR!;
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
 
@@ -150,6 +151,7 @@ let
     arbBot: Bot = {
         address: wallet.address,
         groupAddress: groupAddress.toLowerCase(),
+        redeemOperatorContract: new Contract(redemptionOperatorAddress, groupRedeemAbi, wallet),
         approvedTokens: [],
         groupMembersCache: {
             lastUpdated: 0,
@@ -415,13 +417,12 @@ async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
 async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
     if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
     // @todo check if it is set and do not call it on every redeem
-    let tx = await hubV2Contract.setApprovalForAll(arbBot.groupRedeemOperator, true);
+    let tx = await hubV2Contract.setApprovalForAll(arbBot.redeemOperatorContract?.target, true);
     await tx.wait();
-    
-    const memberAddressesToBigNumber = memberAddresses.map(memberAddress => BigInt(memberAddress));
-    if(arbBot.groupRedeemOperator) {
-        const groupOperatorContract = new Contract(arbBot.groupRedeemOperator, groupRedeemAbi, wallet);
-        tx = await groupOperatorContract.redeem(arbBot.groupAddress, memberAddressesToBigNumber, amounts);
+
+    const sum = amounts.reduce((a, b) => a + b);
+    if(arbBot.redeemOperatorContract) {
+        tx = await arbBot.redeemOperatorContract.redeemWithFoundCollateral(arbBot.groupAddress, sum, true);
         await tx.wait();
     }
 }
@@ -981,7 +982,6 @@ async function main() {
         ...arbBot,
         avatar: botAvatar,
         groupTokenAddress: await getERC20Token(arbBot.groupAddress),
-        groupRedeemOperator: await getRedeemOperator(arbBot.groupAddress)
     };
     console.log("initiating bot with parameters", arbBot);
 
