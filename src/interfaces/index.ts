@@ -1,12 +1,14 @@
+import { Contract } from "ethers";
 import { Swap } from "@balancer/sdk";
 import { Avatar } from '@circles-sdk/sdk';
 
 export interface Bot {
     avatar?: Avatar;
+    groupTokenAddress?: string;
+    redeemOperatorContract?: Contract;
+    groupAddress: string;
     groupMembersCache: MembersCache;
     address: string;
-    groupAddress: string;
-    groupTokenAddress: string;
     approvedTokens: string[]
 }
 
@@ -30,4 +32,10 @@ export interface Deal {
 export enum ArbDirection {
     BUY_MEMBER_TOKENS,
     BUY_GROUP_TOKENS
+}
+export interface FetchBalancerQuoteParams {
+    tokenAddress: string;
+    direction?: ArbDirection;
+    amountOut?: bigint;
+    logQuote?: boolean;
 }
