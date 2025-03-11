@@ -2,9 +2,9 @@ module.exports = {
     apps: [
       {
         name: "arbbot_cmg",
-        script: "dist/index.js", 
-        instances: 1, 
-        exec_mode: "fork", 
+        script: "dist/index.js",
+        instances: 1,
+        exec_mode: "fork",
         node_args: "--env-file .env.cmg"
       },
       {
