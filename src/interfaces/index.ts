@@ -1,10 +1,11 @@
+import { Contract } from "ethers";
 import { Swap } from "@balancer/sdk";
 import { Avatar } from '@circles-sdk/sdk';
 
 export interface Bot {
     avatar?: Avatar;
     groupTokenAddress?: string;
-    groupRedeemOperator?: string;
+    redeemOperatorContract?: Contract;
     groupAddress: string;
     groupMembersCache: MembersCache;
     address: string;

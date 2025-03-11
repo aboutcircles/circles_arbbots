@@ -96,6 +96,19 @@ export const groupRedeemAbi = [
         payable: false,
         stateMutability: "nonpayable",
         type: "function"
+    },
+    {
+        constant: false,
+        inputs: [
+            { name: "_group", type: "address" },
+            { name: "_amountToRedeem", type: "uint256" },
+            { name: "_partialFillable", type: "bool" }
+        ],
+        name: "redeemWithFoundCollateral",
+        outputs: [],
+        payable: false,
+        stateMutability: "nonpayable",
+        type: "function"
     }
 ];
 
