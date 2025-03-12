@@ -64,6 +64,39 @@ export const hubV2Abi = [
         outputs: [],
         stateMutability: "nonpayable",
         type: "function"
+    },
+    {
+      type: "function",
+      name: "safeTransferFrom",
+      inputs: [
+        {
+          name: "_from",
+          type: "address",
+          internalType: "address"
+        },
+        {
+          name: "_to",
+          type: "address",
+          internalType: "address"
+        },
+        {
+          name: "_id",
+          type: "uint256",
+          internalType: "uint256"
+        },
+        {
+          name: "_value",
+          type: "uint256",
+          internalType: "uint256"
+        },
+        {
+          name: "_data",
+          type: "bytes",
+          internalType: "bytes"
+        }
+      ],
+      outputs: [],
+      stateMutability: "nonpayable"
     }
 ];
 
