@@ -123,6 +123,7 @@ const groupAddress = process.env.GROUP_ADDRESS!;
 const redemptionOperatorAddress = process.env.REDEMPTION_OPERATOR!;
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
+const baseRedemptionEncoderAddress = "0x59f6e1B5E6F1448ffBEB99cd164304014fb78A31";
 
 /**
  * @notice Initializes core blockchain objects.
@@ -142,7 +143,7 @@ const selectedCirclesConfig = circlesConfig[chainId];
 const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
 const circlesData = new CirclesData(circlesRPC);
 const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, wallet);
-
+const baseRedemptionEncoderContract = new Contract(baseRedemptionEncoderAddress, baseRedemptionEncoderAbi, wallet);
 /**
  * @notice Global bot state.
  * @dev arbBot stores the bot address, group details, approved tokens, and a cache of group members.
@@ -445,8 +446,7 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
 
      const tokenIds = memberAddresses.map(address => toTokenId(address));
 
-     const baseRedemptionEncoder = new Contract(process.env.BASE_REDEMPTION_ENCODER!, baseRedemptionEncoderAbi, provider);
-     const data = await baseRedemptionEncoder.structureRedemptionData(tokenIds, amounts);
+     const data = await baseRedemptionEncoderContract.structureRedemptionData(tokenIds, amounts);
 
      const sum = amounts.reduce((a, b) => a + b);
 
