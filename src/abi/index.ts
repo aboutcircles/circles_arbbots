@@ -195,4 +195,32 @@ export const inflationaryCirclesOperatorAbi = [
     stateMutability: "view",
     type: "function"
     }
-];  
+];
+
+export const baseRedemptionEncoderAbi = [
+  {
+    type: "function",
+    name: "structureRedemptionData",
+    inputs: [
+      {
+        name: "_redemptionIds",
+        type: "uint256[]",
+        internalType: "uint256[]"
+      },
+      {
+        name: "_redemptionValues",
+        type: "uint256[]",
+        internalType: "uint256[]"
+      }
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "bytes",
+        internalType: "bytes"
+      }
+    ],
+    payable: false,
+    stateMutability: "pure"
+  }
+];

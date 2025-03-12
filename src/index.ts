@@ -43,7 +43,8 @@ import {
     hubV2Abi,
     erc20LiftAbi,
     groupContractAbi,
-    inflationaryTokenAbi
+    inflationaryTokenAbi,
+    baseRedemptionEncoderAbi
 } from "./abi/index.js";
 
 /**
@@ -92,7 +93,7 @@ const DemurragedVSInflation = 1;
  */
 const postgresqlPW = process.env.POSTGRESQL_PW;
 const postgresqlUser = "readonly_user";
-const postgresqlDB = "circles"; 
+const postgresqlDB = "circles";
 const postgressqlHost = "144.76.163.174";
 const postgressqlPort = 5432;
 
@@ -101,7 +102,7 @@ const postgressqlPort = 5432;
  */
 const loggerDBPW = process.env.LOGGERDB_PW;
 const loggerDBUser = "bot";
-const loggerDBDatabase = "bot_activity"; 
+const loggerDBDatabase = "bot_activity";
 const loggerDBHost = "db-postgresql-fra1-54201-do-user-1252164-0.h.db.ondigitalocean.com";
 const loggerDBPort = 25060;
 const loggerDBsslmode = "require";
@@ -215,8 +216,7 @@ async function connectLogging() {
 connectLogging();
 
 /**
- * @notice Retrieves the latest group members from the PostgreSQL database since a given timestamp.
- * @param since The UNIX timestamp from which to fetch new group members.
+ * @notice Retrieves the current group members from the PostgreSQL database.
  * @return {Promise<GroupMember[]>} A promise that resolves to an array of GroupMember objects.
  */
 async function getGroupMembers(): Promise<GroupMember[]> {
@@ -420,12 +420,45 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
     let tx = await hubV2Contract.setApprovalForAll(arbBot.redeemOperatorContract?.target, true);
     await tx.wait();
 
-    const sum = amounts.reduce((a, b) => a + b);
+    const tokenIds = memberAddresses.map(address => toTokenId(address));
+
+    // const sum = amounts.reduce((a, b) => a + b);
     if(arbBot.redeemOperatorContract) {
-        tx = await arbBot.redeemOperatorContract.redeemWithFoundCollateral(arbBot.groupAddress, sum, true);
+        tx = await arbBot.redeemOperatorContract.redeem(arbBot.groupAddress, tokenIds, amounts);
         await tx.wait();
     }
+    // @todo: harden this function
 }
+
+/**
+ * @notice Redeems group tokens for a list of members by formatting the parameters with "base encoding"
+ * (ie. simplest encoding specifying which collateral StandardTreasury/StandardVault should return)
+ * @dev this currently makes an on-chain call to a pure function on `BaseRedemptionEncoder`,
+ * but this is just to demonstrate the common denominator for all (so far) existing groups.
+ * @param memberAddresses An array of member addresses.
+ * @param amounts An array of amounts to redeem corresponding to each member.
+ * @return {Promise<void>}
+ * @throws Will throw an error if the lengths of memberAddresses and amounts do not match.
+ */
+ async function redeemGroupTokensWithHubForBaseEncoding(memberAddresses: string[], amounts: bigint[]) {
+     if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
+
+     const tokenIds = memberAddresses.map(address => toTokenId(address));
+
+     const baseRedemptionEncoder = new Contract(process.env.BASE_REDEMPTION_ENCODER!, baseRedemptionEncoderAbi, provider);
+     const data = await baseRedemptionEncoder.structureRedemptionData(tokenIds, amounts);
+
+     const sum = amounts.reduce((a, b) => a + b);
+
+     let tx = await hubV2Contract.safeTransferFrom(
+         arbBot.address,
+         await hubV2Contract.treasuries(arbBot.groupAddress),
+         toTokenId(arbBot.groupAddress),
+         sum,
+         data
+     );
+     await tx.wait();
+ }
 
 /**
  * @notice Executes a swap on Balancer using the provided Swap object.
@@ -440,10 +473,10 @@ async function swapUsingBalancer(swap: Swap, attempt: number = 1): Promise<boole
     const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
     const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
     const slippage = Slippage.fromPercentage("0.1"); // 0.1%
-    
+
 
     let buildInput: SwapBuildCallInput;
-    
+
     buildInput = {
         slippage,
         deadline,
@@ -452,7 +485,7 @@ async function swapUsingBalancer(swap: Swap, attempt: number = 1): Promise<boole
         sender: arbBot.address as `0x${string}`,
         recipient: arbBot.address as `0x${string}`,
     };
-    
+
     const callData = swap.buildCall(buildInput) as SwapBuildOutputExactOut;
 
     // @dev the last check to make sure that the amountIn is smaller than amountOut - epsilon
@@ -472,9 +505,9 @@ async function swapUsingBalancer(swap: Swap, attempt: number = 1): Promise<boole
             return !!txResponse?.hash;
         }).catch(async () => {
             console.error("!!! Transaction failed !!!");
-            // @notice if tx fails we check if we have enough required tokens, 
+            // @notice if tx fails we check if we have enough required tokens,
             // the `swap.inputAmount.amount` and `callData.maxAmountIn.amount` values might differ significantly
-            
+
             if(callData.maxAmountIn.amount > swap.inputAmount.amount && attempt != 0) {
                 console.log("Second swap attempt");
                 await requireTokens(swap.inputAmount.token.address, callData.maxAmountIn.amount);
@@ -503,15 +536,15 @@ async function theoreticallyAvailableAmountCRC(tokenAddress: string | undefined)
 
     // Get the current erc20 token balance for the bot.
     const erc20TokenBalance = await getBotErc20Balance(tokenAddress);
-        
+
     const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
-    
+
     const matchingBalance = balances.find(
         (balance) => balance.tokenOwner === tokenAvatar && balance.isErc1155 === true
     );
     // Retrieve the current ERC1155 token balance for the bot.
     const erc1155TokenBalance = BigInt(matchingBalance?.staticAttoCircles ?? 0);
-  
+
 
     let extractableAmonut = BigInt(0);
     if (tokenAddress === arbBot.groupTokenAddress) {
@@ -545,7 +578,7 @@ async function updateMemberCache(member:GroupMember): Promise<GroupMember> {
     console.log(`Updating member ${member.address}`);
     const tokenWrapperContract = new Contract(erc20LiftAddress, erc20LiftAbi, wallet);
     // we call the contract 1 by 1 for each address
-    
+
     if(member.tokenAddress === ethers.ZeroAddress || !member.tokenAddress) {
         const tokenAddress = await tokenWrapperContract.erc20Circles(DemurragedVSInflation, member.address);
         member.tokenAddress = tokenAddress;
@@ -590,8 +623,8 @@ async function amountOutGuesser(
         // Propose a new amount by doubling the current amount out.
         const proposedAmountOut = currentAmountOut * 2n;
         const quote = await fetchBalancerQuote({
-            tokenAddress: tokenAddress, 
-            direction: direction, 
+            tokenAddress: tokenAddress,
+            direction: direction,
             amountOut: proposedAmountOut
         });
         const nextPrice = quote?.inputAmount.amount ?? BigInt(0);
@@ -608,7 +641,7 @@ async function amountOutGuesser(
     }
 
     return bestSwapData;
-}  
+}
 
 /**
  * @notice Picks a potential arbitrage deal for a given group member by evaluating swap profitability and executability.
@@ -623,12 +656,12 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
     let direction = ArbDirection.BUY_MEMBER_TOKENS;
     let swapData = null;
     let amountOut = MIN_EXTRACTABLE_AMOUNT;
-  
+
     // If there's no price yet or if it's higher than the minimum threshold plus precision allowance
     if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT + EPSILON) {
         direction = ArbDirection.BUY_GROUP_TOKENS;
         swapData = await fetchBalancerQuote({
-            tokenAddress: member.tokenAddress, 
+            tokenAddress: member.tokenAddress,
             direction: direction,
             logQuote: LOG_ACTIVITY
         });
@@ -637,16 +670,16 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
         if (amountIn === BigInt(0) || amountIn > amountOut - EPSILON ) {
             isProfitable = false;
         }
-    } 
+    }
     // If the price is lower than the minimum threshold
     else if (amountIn < MIN_EXTRACTABLE_AMOUNT - EPSILON) {
         // Proceed with fetching the swap quote in the default direction
         swapData = await fetchBalancerQuote({
-            tokenAddress: member.tokenAddress, 
+            tokenAddress: member.tokenAddress,
             direction: direction
         });
-    }    
-    
+    }
+
     // Check if the bot has enough tokens to execute the swap
     if(isProfitable) {
         const recommendedSwapData = await amountOutGuesser(member.tokenAddress, direction, amountIn);
@@ -715,7 +748,7 @@ async function unwrapTokenList(tokenList: TokenBalanceRow[]) {
     });
     await Promise.all(unwrappingQueue);
 }
-  
+
 /**
  * @notice Mints group tokens from members' balances if sufficient tokens exist.
  * @param tokensToMint The required number of tokens to mint.
@@ -729,25 +762,25 @@ async function mintIfPossibleFromMembers(
     // 1. Sum up members' tokens (exclude group address balances)
     const membersTokens = balances.filter(balance => balance.tokenOwner !== arbBot.groupAddress);
     const additionalMintableGroupTokens = sumBalance(membersTokens);
-  
+
     // 2. Check if there's enough
     if (additionalMintableGroupTokens < tokensToMint) {
         return false;
     }
-  
+
     // 3. Gather enough from members
     const utilizableBalances = gatherTokens(membersTokens, tokensToMint);
-  
+
     // 4. Unwrap them
     await unwrapTokenList(utilizableBalances);
-  
+
     // 5. Mint from those unwrapped tokens
     console.log("Group tokens mint started");
     await mintGroupTokensFromIndividualTokens(utilizableBalances);
-  
+
     return true;
 }
-  
+
 /**
  * @notice Mints group tokens from others' balances, then redeems to obtain inflationary tokens.
  * @param tokensToMint The required token amount to mint.
@@ -765,28 +798,28 @@ async function mintIfPossibleFromOthers(
     const maxRedeemableTokensAmount = await getMaxRedeemableAmount(avatar);
     const filteredBalances = balances.filter(balance => balance.tokenOwner !== avatar);
     const additionalMintableTokens = sumBalance(filteredBalances);
-  
+
     // Check if we have enough to redeem
     if (additionalMintableTokens < tokensToMint || maxRedeemableTokensAmount < tokensToMint) {
         return false;
     }
-  
+
     // Gather enough tokens
     const utilizableBalances = gatherTokens(filteredBalances, tokensToMint);
-  
+
     // Unwrap them
     await unwrapTokenList(utilizableBalances);
-  
+
     // Some flows exclude group-owned tokens before mint:
     const filteredGroupTokens = utilizableBalances.filter(token => token.tokenOwner !== arbBot.groupAddress);
-  
+
     console.log("Group tokens mint");
     await mintGroupTokensFromIndividualTokens(filteredGroupTokens);
-  
+
     console.log("Group tokens redeem");
     const demurrageValue = await convertInflationaryToDemurrage(tokenAddress, tokensToMint);
-    await redeemGroupTokens([avatar], [demurrageValue]);
-  
+    await redeemGroupTokensWithHubForBaseEncoding([avatar], [demurrageValue]);
+
     return true;
 }
 
@@ -813,13 +846,13 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
     if (initialTokenBalance >= tokenAmount) {
         return true;
     }
-  
+
     // Calculate the lacking amount.
     const lackingAmount = tokenAmount - initialTokenBalance;
-  
+
     // Retrieve the bot's balance in wrappable form.
     const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
-  
+
     const staticBalance = balances.filter(
         balance => tokenAvatar.toLowerCase() === balance.tokenOwner && balance.isErc1155 === true
     );
@@ -845,16 +878,16 @@ async function requireTokens(tokenAddress: string, tokenAmount: bigint): Promise
             return false;
         }
     }
-  
+
     // Convert the lacking amount to a demurrage-adjusted value to prevent precision overshoots.
     const convertedAmount = await convertInflationaryToDemurrage(tokenAddress, lackingAmount - REQUIRE_PRECISION);
-  
+
     console.log("Wrapping tokens");
     await arbBot.avatar.wrapInflationErc20(tokenAvatar, convertedAmount);
-  
+
     return true;
 }
-  
+
 /**
  * @notice Converts an inflationary token amount to its corresponding demurrage-adjusted value.
  * @param tokenAddress The address of the inflationary token.
@@ -958,7 +991,7 @@ async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalance
     const filteredBalances = botBalances.filter(token =>
         memberAddresses.has(token.tokenOwner.toLowerCase()) && token.version === 2
     );
-      
+
     return sortBalances(filteredBalances);
 }
 
@@ -969,6 +1002,18 @@ async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalance
  */
 function sleep(pauseTime:number) {
     return new Promise(resolve => setTimeout(resolve, pauseTime));
+}
+
+/**
+ * @notice Converts an Ethereum address to a token ID by removing the '0x' prefix,
+ *         converting to lowercase, and padding to 32 bytes.
+ * @param address The Ethereum address to convert.
+ * @return {bigint} The address converted to a bigint token ID.
+ */
+function toTokenId(address: string): bigint {
+    // Remove "0x" prefix if present and pad to 64 characters (32 bytes)
+    const paddedHex = address.toLowerCase().replace('0x', '').padStart(64, '0');
+    return BigInt('0x' + paddedHex);
 }
 
 /**
@@ -995,13 +1040,13 @@ async function main() {
             try {
                 await updateMemberCache(arbBot.groupMembersCache.members[i]);
 
-                if (arbBot.groupMembersCache.members[i].latestPrice) { 
+                if (arbBot.groupMembersCache.members[i].latestPrice) {
                     const member = arbBot.groupMembersCache.members[i];
                     const deal = await pickDeal(member);
                     if(deal.isProfitable) {
                         if (LOG_ACTIVITY) {
                             const dealData = deal.swapData;
-                            
+
                             const logValues = [Math.floor(Date.now() / 1000), dealData?.inputAmount.token.address, dealData?.outputAmount.token.address, dealData?.inputAmount.amount.toString(), dealData?.outputAmount.amount.toString()];
                             await loggerClient.query(logQuery, logValues);
                         }
