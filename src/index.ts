@@ -143,7 +143,7 @@ const selectedCirclesConfig = circlesConfig[chainId];
 const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
 const circlesData = new CirclesData(circlesRPC);
 const hubV2Contract = new Contract(selectedCirclesConfig.v2HubAddress, hubV2Abi, wallet);
-const baseRedemptionEncoderContract = new Contract(baseRedemptionEncoderAddress, baseRedemptionEncoderAbi, wallet);
+
 /**
  * @notice Global bot state.
  * @dev arbBot stores the bot address, group details, approved tokens, and a cache of group members.
@@ -154,6 +154,7 @@ let
         address: wallet.address,
         groupAddress: groupAddress.toLowerCase(),
         redeemOperatorContract: new Contract(redemptionOperatorAddress, groupRedeemAbi, wallet),
+        baseRedemptionEncoderContract: new Contract(baseRedemptionEncoderAddress, baseRedemptionEncoderAbi, wallet),
         approvedTokens: [],
         groupMembersCache: {
             lastUpdated: 0,
@@ -442,22 +443,26 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
  * @throws Will throw an error if the lengths of memberAddresses and amounts do not match.
  */
  async function redeemGroupTokensWithHubForBaseEncoding(memberAddresses: string[], amounts: bigint[]) {
-     if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
+    if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
 
-     const tokenIds = memberAddresses.map(address => toTokenId(address));
+    const tokenIds = memberAddresses.map(address => toTokenId(address));
 
-     const data = await baseRedemptionEncoderContract.structureRedemptionData(tokenIds, amounts);
+    if (arbBot.baseRedemptionEncoderContract) {
+        let data = await arbBot.baseRedemptionEncoderContract.structureRedemptionData(tokenIds, amounts);
 
-     const sum = amounts.reduce((a, b) => a + b);
+        const sum = amounts.reduce((a, b) => a + b);
 
-     let tx = await hubV2Contract.safeTransferFrom(
-         arbBot.address,
-         await hubV2Contract.treasuries(arbBot.groupAddress),
-         toTokenId(arbBot.groupAddress),
-         sum,
-         data
-     );
-     await tx.wait();
+        let tx = await hubV2Contract.safeTransferFrom(
+            arbBot.address,
+            await hubV2Contract.treasuries(arbBot.groupAddress),
+            toTokenId(arbBot.groupAddress),
+            sum,
+            data
+        );
+        await tx.wait();
+    } else {
+        throw new Error("No BaseRedemptionEncoder contract found");
+    }
  }
 
 /**

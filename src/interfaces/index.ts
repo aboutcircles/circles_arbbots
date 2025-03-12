@@ -6,6 +6,7 @@ export interface Bot {
     avatar?: Avatar;
     groupTokenAddress?: string;
     redeemOperatorContract?: Contract;
+    baseRedemptionEncoderContract?: Contract;
     groupAddress: string;
     groupMembersCache: MembersCache;
     address: string;
