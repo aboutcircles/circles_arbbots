@@ -823,6 +823,7 @@ async function mintIfPossibleFromOthers(
 
     console.log("Group tokens redeem");
     const demurrageValue = await convertInflationaryToDemurrage(tokenAddress, tokensToMint);
+
     await redeemGroupTokensWithHubForBaseEncoding([avatar], [demurrageValue]);
 
     return true;
