@@ -43,7 +43,8 @@ import {
     hubV2Abi,
     erc20LiftAbi,
     groupContractAbi,
-    inflationaryTokenAbi
+    inflationaryTokenAbi,
+    baseRedemptionEncoderAbi
 } from "./abi/index.js";
 
 /**
@@ -122,6 +123,7 @@ const groupAddress = process.env.GROUP_ADDRESS!;
 const redemptionOperatorAddress = process.env.REDEMPTION_OPERATOR!;
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
+const baseRedemptionEncoderAddress = "0x59f6e1B5E6F1448ffBEB99cd164304014fb78A31";
 
 /**
  * @notice Initializes core blockchain objects.
@@ -152,6 +154,7 @@ let
         address: wallet.address,
         groupAddress: groupAddress.toLowerCase(),
         redeemOperatorContract: new Contract(redemptionOperatorAddress, groupRedeemAbi, wallet),
+        baseRedemptionEncoderContract: new Contract(baseRedemptionEncoderAddress, baseRedemptionEncoderAbi, wallet),
         approvedTokens: [],
         groupMembersCache: {
             lastUpdated: 0,
@@ -215,8 +218,7 @@ async function connectLogging() {
 connectLogging();
 
 /**
- * @notice Retrieves the latest group members from the PostgreSQL database since a given timestamp.
- * @param since The UNIX timestamp from which to fetch new group members.
+ * @notice Retrieves the current group members from the PostgreSQL database.
  * @return {Promise<GroupMember[]>} A promise that resolves to an array of GroupMember objects.
  */
 async function getGroupMembers(): Promise<GroupMember[]> {
@@ -420,12 +422,48 @@ async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
     let tx = await hubV2Contract.setApprovalForAll(arbBot.redeemOperatorContract?.target, true);
     await tx.wait();
 
-    const sum = amounts.reduce((a, b) => a + b);
+    const tokenIds = memberAddresses.map(address => toTokenId(address));
+
+    // const sum = amounts.reduce((a, b) => a + b);
     if(arbBot.redeemOperatorContract) {
-        tx = await arbBot.redeemOperatorContract.redeemWithFoundCollateral(arbBot.groupAddress, sum, true);
+        tx = await arbBot.redeemOperatorContract.redeem(arbBot.groupAddress, tokenIds, amounts);
         await tx.wait();
     }
+    // @todo: harden this function
 }
+
+/**
+ * @notice Redeems group tokens for a list of members by formatting the parameters with "base encoding"
+ * (ie. simplest encoding specifying which collateral StandardTreasury/StandardVault should return)
+ * @dev this currently makes an on-chain call to a pure function on `BaseRedemptionEncoder`,
+ * but this is just to demonstrate the common denominator for all (so far) existing groups.
+ * @param memberAddresses An array of member addresses.
+ * @param amounts An array of amounts to redeem corresponding to each member.
+ * @return {Promise<void>}
+ * @throws Will throw an error if the lengths of memberAddresses and amounts do not match.
+ */
+ async function redeemGroupTokensWithHubForBaseEncoding(memberAddresses: string[], amounts: bigint[]) {
+    if(memberAddresses.length != amounts.length) throw new Error("Mismatch in array lengths: memberAddresses, amounts");
+
+    const tokenIds = memberAddresses.map(address => toTokenId(address));
+
+    if (arbBot.baseRedemptionEncoderContract) {
+        let data = await arbBot.baseRedemptionEncoderContract.structureRedemptionData(tokenIds, amounts);
+
+        const sum = amounts.reduce((a, b) => a + b);
+
+        let tx = await hubV2Contract.safeTransferFrom(
+            arbBot.address,
+            await hubV2Contract.treasuries(arbBot.groupAddress),
+            toTokenId(arbBot.groupAddress),
+            sum,
+            data
+        );
+        await tx.wait();
+    } else {
+        throw new Error("No BaseRedemptionEncoder contract found");
+    }
+ }
 
 /**
  * @notice Executes a swap on Balancer using the provided Swap object.
@@ -785,7 +823,8 @@ async function mintIfPossibleFromOthers(
 
     console.log("Group tokens redeem");
     const demurrageValue = await convertInflationaryToDemurrage(tokenAddress, tokensToMint);
-    await redeemGroupTokens([avatar], [demurrageValue]);
+
+    await redeemGroupTokensWithHubForBaseEncoding([avatar], [demurrageValue]);
 
     return true;
 }
@@ -969,6 +1008,18 @@ async function getBotBalances(members: GroupMember[] = []): Promise<TokenBalance
  */
 function sleep(pauseTime:number) {
     return new Promise(resolve => setTimeout(resolve, pauseTime));
+}
+
+/**
+ * @notice Converts an Ethereum address to a token ID by removing the '0x' prefix,
+ *         converting to lowercase, and padding to 32 bytes.
+ * @param address The Ethereum address to convert.
+ * @return {bigint} The address converted to a bigint token ID.
+ */
+function toTokenId(address: string): bigint {
+    // Remove "0x" prefix if present and pad to 64 characters (32 bytes)
+    const paddedHex = address.toLowerCase().replace('0x', '').padStart(64, '0');
+    return BigInt('0x' + paddedHex);
 }
 
 /**
