@@ -744,10 +744,10 @@ async function amountOutGuesser(
     direction == ArbDirection.BUY_MEMBER_TOKENS
       ? arbBot.groupTokenAddress
       : tokenAddress;
-  const directionString =
-    direction == ArbDirection.BUY_MEMBER_TOKENS
-      ? "group to member"
-      : "member to group";
+  // const directionString =
+  //   direction == ArbDirection.BUY_MEMBER_TOKENS
+  //     ? "group to member"
+  //     : "member to group";
   const availableTokensAmount =
     await theoreticallyAvailableAmountCRC(tokenToCheck);
 
