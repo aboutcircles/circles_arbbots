@@ -120,6 +120,7 @@ const LOG_ACTIVITY = true;
  * @dev balancerVaultAddress is the address of the Balancer Vault V2.
  */
 const groupAddress = process.env.GROUP_ADDRESS!;
+const mintHandlerAddress = process.env.MINT_HANDLER_ADDRESS!;
 const redemptionOperatorAddress = process.env.REDEMPTION_OPERATOR!;
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
@@ -154,6 +155,7 @@ const hubV2Contract = new Contract(
  * @dev arbBot stores the bot address, group details, approved tokens, and a cache of group members.
  * @dev sdk will later hold an instance of the Circles SDK.
  */
+
 let arbBot: Bot = {
     address: wallet.address,
     groupAddress: groupAddress.toLowerCase(),
@@ -640,52 +642,101 @@ async function theoreticallyAvailableAmountCRC(
   tokenAddress: string | undefined,
 ): Promise<bigint> {
   if (!tokenAddress) return BigInt(0);
-  tokenAddress = tokenAddress.toLocaleLowerCase();
 
-  if (!arbBot.groupMembersCache) return BigInt(0);
-  const balances = await getBotBalances(arbBot.groupMembersCache.members);
-  if (!balances) return BigInt(0);
-
-  // Get the current erc20 token balance for the bot.
-  const erc20TokenBalance = await getBotErc20Balance(tokenAddress);
-
+  tokenAddress = tokenAddress.toLowerCase();
   const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
 
-  const matchingBalance = balances.find(
-    (balance) =>
-      balance.tokenOwner === tokenAvatar && balance.isErc1155 === true,
-  );
-  // Retrieve the current ERC1155 token balance for the bot.
-  const erc1155TokenBalance = BigInt(matchingBalance?.staticAttoCircles ?? 0);
+  let extractableAmount = BigInt(0);
 
-  let extractableAmonut = BigInt(0);
   if (tokenAddress === arbBot.groupTokenAddress) {
-    // For group tokens: Sum up all member tokens since they can potentially be converted
-    // into group tokens through the `groupMint` function.
-    const membersTokens = balances.filter(
-      (balance) => balance.tokenOwner !== arbBot.groupAddress,
-    );
-    extractableAmonut = sumBalance(membersTokens);
-  } else {
-    // For member tokens: Determine the maximum redeemable amount of tokens from the group vault.
-    // Then, sum all other tokens (including group tokens) that could be converted into ERC1155 group tokens,
-    // and use the lesser of the two amounts.
-    const maxRedeemableTokensAmount = await getMaxRedeemableAmount(tokenAvatar);
-    const filteredBalances = balances.filter(
-      (balance) => balance.tokenOwner !== tokenAvatar,
-    );
-    const convertableTokensOnBalance = sumBalance(filteredBalances);
+    console.log("MInt handler address:", typeof mintHandlerAddress);
 
-    extractableAmonut =
-      maxRedeemableTokensAmount > convertableTokensOnBalance
-        ? convertableTokensOnBalance
-        : maxRedeemableTokensAmount;
+    const params = {
+      to: mintHandlerAddress,
+      useWrappedBalances: true,
+    };
+    const maxTransferable =
+      await arbBot.avatar.getMaxTransferableAmount(params);
+    extractableAmount = BigInt(maxTransferable);
+  } else {
+    const balances = await circlesData.getTokenBalances(arbBot.address);
+    if (!balances) return BigInt(0);
+
+    const erc1155TokenBalance = balances
+      .filter(
+        (token: TokenBalanceRow) =>
+          token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
+      )
+      .reduce(
+        (sum: bigint, token: TokenBalanceRow) =>
+          sum + BigInt(token.attoCircles),
+        BigInt(0),
+      );
+
+    console.log("arbbot address", typeof arbBot.address);
+
+    const params = {
+      to: arbBot.address.toLowerCase(), // ensure address is lowercase
+      toTokens: [tokenAddress],
+      useWrappedBalances: true,
+    };
+    const maxPullableAmountInErc1155 =
+      await arbBot.avatar.getMaxTransferableAmount(params);
+
+    extractableAmount =
+      erc1155TokenBalance + BigInt(maxPullableAmountInErc1155);
   }
 
-  // The total theoretically available amount is the sum of the ERC20 balance,
-  // the ERC1155 balance, and the mintable/redeemable amount from the group.
-  return erc20TokenBalance + erc1155TokenBalance + extractableAmonut;
+  // Finally, get the amount in current static units
+  const inflationaryValue = await convertDemurrageToInflationary(
+    tokenAddress,
+    extractableAmount,
+  );
+
+  return inflationaryValue;
 }
+
+// const balances = await getBotBalances(arbBot.groupMembersCache.members);
+// if (!balances) return BigInt(0);
+
+// Get the current erc20 token balance for the bot.
+// const erc20TokenBalance = await getBotErc20Balance(tokenAddress);
+
+// const matchingBalance = balances.find(
+//   (balance) =>
+//     balance.tokenOwner === tokenAvatar && balance.isErc1155 === true,
+// );
+// // Retrieve the current ERC1155 token balance for the bot.
+// const erc1155TokenBalance = BigInt(matchingBalance?.staticAttoCircles ?? 0);
+
+// let extractableAmonut = BigInt(0);
+// if (tokenAddress === arbBot.groupTokenAddress) {
+//   // For group tokens: Sum up all member tokens since they can potentially be converted
+//   // into group tokens through the `groupMint` function.
+//   const membersTokens = balances.filter(
+//     (balance) => balance.tokenOwner !== arbBot.groupAddress,
+//   );
+//   extractableAmonut = sumBalance(membersTokens);
+// } else {
+//   // For member tokens: Determine the maximum redeemable amount of tokens from the group vault.
+//   // Then, sum all other tokens (including group tokens) that could be converted into ERC1155 group tokens,
+//   // and use the lesser of the two amounts.
+//   const maxRedeemableTokensAmount = await getMaxRedeemableAmount(tokenAvatar);
+//   const filteredBalances = balances.filter(
+//     (balance) => balance.tokenOwner !== tokenAvatar,
+//   );
+//   const convertableTokensOnBalance = sumBalance(filteredBalances);
+
+//   extractableAmonut =
+//     maxRedeemableTokensAmount > convertableTokensOnBalance
+//       ? convertableTokensOnBalance
+//       : maxRedeemableTokensAmount;
+// }
+
+// // The total theoretically available amount is the sum of the ERC20 balance,
+// // the ERC1155 balance, and the mintable/redeemable amount from the group.
+// return erc20TokenBalance + erc1155TokenBalance + extractableAmonut;
+// }
 
 /**
  * @notice Updates a specific group member's cache data, including token address and latest price.
@@ -1097,6 +1148,33 @@ async function convertInflationaryToDemurrage(
     );
 
   return demurrageValue;
+}
+
+/**
+ * @notice Converts a demurrage token amount to its corresponding inflationary value.
+ * @param tokenAddress The address of the inflationary token.
+ * @param amount The amount to convert.
+ * @return {Promise<bigint>} A promise that resolves to the converted inflationary value.
+ */
+async function convertDemurrageToInflationary(
+  tokenAddress: string,
+  amount: bigint,
+): Promise<bigint> {
+  const inflationaryTokenContract = new Contract(
+    tokenAddress,
+    inflationaryTokenAbi,
+    wallet,
+  );
+  const days = await inflationaryTokenContract.day(
+    (await provider.getBlock("latest"))?.timestamp,
+  );
+  const inflationaryValue =
+    await inflationaryTokenContract.convertDemurrageToInflationaryValue(
+      amount,
+      days,
+    );
+
+  return inflationaryValue;
 }
 
 /**

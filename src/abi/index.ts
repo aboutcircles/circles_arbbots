@@ -1,32 +1,32 @@
 // ABIs
 export const erc20Abi = [
-    {
-        constant: true,
-        inputs: [{ name: "_owner", type: "address" }],
-        name: "balanceOf",
-        outputs: [{ name: "balance", type: "uint256" }],
-        type: "function",
-    },
-    {
-        constant: true,
-        inputs: [
-            { name: "_owner", type: "address" },
-            { name: "_spender", type: "address" }
-        ],
-        name: "allowance",
-        outputs: [{ name: "remaining", type: "uint256" }],
-        type: "function",
-    },
-    {
-        inputs: [
-            { name: '_spender', type: 'address' },
-            { name: '_value', type: 'uint256' },
-        ],
-        name: 'approve',
-        outputs: [{ type: 'bool' }],
-        stateMutability: 'nonpayable',
-        type: 'function',
-    }
+  {
+    constant: true,
+    inputs: [{ name: "_owner", type: "address" }],
+    name: "balanceOf",
+    outputs: [{ name: "balance", type: "uint256" }],
+    type: "function",
+  },
+  {
+    constant: true,
+    inputs: [
+      { name: "_owner", type: "address" },
+      { name: "_spender", type: "address" },
+    ],
+    name: "allowance",
+    outputs: [{ name: "remaining", type: "uint256" }],
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "_spender", type: "address" },
+      { name: "_value", type: "uint256" },
+    ],
+    name: "approve",
+    outputs: [{ type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
 ];
 
 export const hubV2Abi = [
@@ -101,48 +101,44 @@ export const hubV2Abi = [
 ];
 
 export const groupTreasuryAbi = [
-    {
-        constant: true,
-        inputs: [
-            { name: "user", type: "address" }
-        ],
-        name: "vaults",
-        outputs: [
-            { name: "", type: "address" }
-        ],
-        payable: false,
-        stateMutability: "view",
-        type: "function"
-    }
+  {
+    constant: true,
+    inputs: [{ name: "user", type: "address" }],
+    name: "vaults",
+    outputs: [{ name: "", type: "address" }],
+    payable: false,
+    stateMutability: "view",
+    type: "function",
+  },
 ];
 
 export const groupRedeemAbi = [
-    {
-        constant: false,
-        inputs: [
-            { name: "group", type: "address" },
-            { name: "redemptionIds", type: "uint256[]" },
-            { name: "redemptionValues", type: "uint256[]" }
-        ],
-        name: "redeem",
-        outputs: [],
-        payable: false,
-        stateMutability: "nonpayable",
-        type: "function"
-    },
-    {
-        constant: false,
-        inputs: [
-            { name: "_group", type: "address" },
-            { name: "_amountToRedeem", type: "uint256" },
-            { name: "_partialFillable", type: "bool" }
-        ],
-        name: "redeemWithFoundCollateral",
-        outputs: [],
-        payable: false,
-        stateMutability: "nonpayable",
-        type: "function"
-    }
+  {
+    constant: false,
+    inputs: [
+      { name: "group", type: "address" },
+      { name: "redemptionIds", type: "uint256[]" },
+      { name: "redemptionValues", type: "uint256[]" },
+    ],
+    name: "redeem",
+    outputs: [],
+    payable: false,
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    constant: false,
+    inputs: [
+      { name: "_group", type: "address" },
+      { name: "_amountToRedeem", type: "uint256" },
+      { name: "_partialFillable", type: "bool" },
+    ],
+    name: "redeemWithFoundCollateral",
+    outputs: [],
+    payable: false,
+    stateMutability: "nonpayable",
+    type: "function",
+  },
 ];
 
 export const groupContractAbi = [
@@ -177,57 +173,57 @@ export const erc20LiftAbi = [
 ];
 
 export const inflationaryTokenAbi = [
-    {
-        constant: true,
-        inputs: [],
-        name: "avatar",
-        outputs: [
-            { name: "", type: "address"}
-        ],
-        payable: false,
-        stateMutability: "view",
-        type: "function"
-    },
-    {
-        inputs: [
-            { name: "_inflationaryValue", type: "uint256" },
-            { name: "_day", type: "uint64" }
-        ],
-        name: "convertInflationaryToDemurrageValue",
-        outputs: [
-            { type: "uint256" }
-        ],
-        stateMutability: "pure",
-        type: "function"
-    },
-    {
-        inputs: [
-            { name: "_timestamp", type: "uint256" }
-        ],
-        name: "day",
-        outputs: [
-            { type: "uint64" }
-        ],
-        stateMutability: "view",
-        type: "function"
-    }
+  {
+    constant: true,
+    inputs: [],
+    name: "avatar",
+    outputs: [{ name: "", type: "address" }],
+    payable: false,
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "_demurrageValue", type: "uint256" },
+      { name: "_dayUpdated", type: "uint64" },
+    ],
+    name: "convertDemurrageToInflationaryValue",
+    outputs: [{ type: "uint256" }],
+    stateMutability: "pure",
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "_inflationaryValue", type: "uint256" },
+      { name: "_day", type: "uint64" },
+    ],
+    name: "convertInflationaryToDemurrageValue",
+    outputs: [{ type: "uint256" }],
+    stateMutability: "pure",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "_timestamp", type: "uint256" }],
+    name: "day",
+    outputs: [{ type: "uint64" }],
+    stateMutability: "view",
+    type: "function",
+  },
 ];
 
 export const inflationaryCirclesOperatorAbi = [
-    {
+  {
     constant: true,
     inputs: [
-        { name: "_account", type: "address" },
-        { name: "_id", type: "uint256" }
+      { name: "_account", type: "address" },
+      { name: "_id", type: "uint256" },
     ],
     name: "inflationaryBalanceOf",
-    outputs: [
-        { name: "", type: "uint256" }
-    ],
+    outputs: [{ name: "", type: "uint256" }],
     payable: false,
     stateMutability: "view",
-    type: "function"
-    }
+    type: "function",
+  },
 ];
 
 export const baseRedemptionEncoderAbi = [
@@ -238,22 +234,22 @@ export const baseRedemptionEncoderAbi = [
       {
         name: "_redemptionIds",
         type: "uint256[]",
-        internalType: "uint256[]"
+        internalType: "uint256[]",
       },
       {
         name: "_redemptionValues",
         type: "uint256[]",
-        internalType: "uint256[]"
-      }
+        internalType: "uint256[]",
+      },
     ],
     outputs: [
       {
         name: "",
         type: "bytes",
-        internalType: "bytes"
-      }
+        internalType: "bytes",
+      },
     ],
     payable: false,
-    stateMutability: "pure"
-  }
+    stateMutability: "pure",
+  },
 ];
