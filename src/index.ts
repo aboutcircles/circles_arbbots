@@ -1092,6 +1092,7 @@ async function requireTokens(
       mintHandlerAddress,
       missingAmountDemurragedUnits,
       undefined,
+      undefined,
       true,
       undefined,
       undefined,
@@ -1100,6 +1101,7 @@ async function requireTokens(
     await arbBot.avatar.transfer(
       arbBot.address,
       missingAmountDemurragedUnits,
+      undefined,
       undefined,
       true,
       undefined,
