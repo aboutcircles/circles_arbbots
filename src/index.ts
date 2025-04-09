@@ -662,21 +662,17 @@ async function theoreticallyAvailableAmountCRC(
     const balances = await circlesData.getTokenBalances(arbBot.address);
     if (!balances) return BigInt(0);
 
-    const erc1155TokenBalance = balances
-      .filter(
+    const erc1155TokenBalance = BigInt(
+      balances.find(
         (token: TokenBalanceRow) =>
           token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
-      )
-      .reduce(
-        (sum: bigint, token: TokenBalanceRow) =>
-          sum + BigInt(token.attoCircles),
-        BigInt(0),
-      );
+      )?.attoCircles ?? 0,
+    );
 
     console.log("arbbot address", typeof arbBot.address);
 
     const params = {
-      to: arbBot.address.toLowerCase(), // ensure address is lowercase
+      to: arbBot.address,
       toTokens: [tokenAddress],
       useWrappedBalances: true,
     };
