@@ -646,42 +646,47 @@ async function theoreticallyAvailableAmountCRC(
   tokenAddress = tokenAddress.toLowerCase();
   const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
 
-  let extractableAmount = BigInt(0);
+  // fetch the bot's token botBalances
+  // @todo this could probably be cached
+  const balances = await circlesData.getTokenBalances(arbBot.address);
+  if (!balances) return BigInt(0);
 
+  // get the current erc1155 balance (in demurraged units)
+  let erc1155TokenBalance =
+    balances.find(
+      (token: TokenBalanceRow) =>
+        token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
+    )?.attoCircles ?? 0;
+
+  // find out how many tokens we can turn to the target token via the pathfinder
+  let pullableAmount = BigInt(0);
+
+  // if the target token is a group token, we request the pathfinder to the mint handler
   if (tokenAddress === arbBot.groupTokenAddress) {
-    console.log("MInt handler address:", typeof mintHandlerAddress);
-
-    const params = {
-      to: mintHandlerAddress,
-      useWrappedBalances: true,
-    };
-    const maxTransferable =
-      await arbBot.avatar.getMaxTransferableAmount(params);
-    extractableAmount = BigInt(maxTransferable);
-  } else {
-    const balances = await circlesData.getTokenBalances(arbBot.address);
-    if (!balances) return BigInt(0);
-
-    const erc1155TokenBalance = BigInt(
-      balances.find(
-        (token: TokenBalanceRow) =>
-          token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
-      )?.attoCircles ?? 0,
+    pullableAmount += BigInt(
+      (await arbBot.avatar.getMaxTransferableAmount(
+        mintHandlerAddress,
+        undefined,
+        true,
+        undefined,
+        undefined,
+      )) *
+        10 ** 18,
     );
-
-    console.log("arbbot address", typeof arbBot.address);
-
-    const params = {
-      to: arbBot.address,
-      toTokens: [tokenAddress],
-      useWrappedBalances: true,
-    };
-    const maxPullableAmountInErc1155 =
-      await arbBot.avatar.getMaxTransferableAmount(params);
-
-    extractableAmount =
-      erc1155TokenBalance + BigInt(maxPullableAmountInErc1155);
+  } else {
+    pullableAmount += BigInt(
+      (await arbBot.avatar.getMaxTransferableAmount(
+        arbBot.address,
+        undefined,
+        true,
+        undefined,
+        [tokenAvatar],
+      )) *
+        10 ** 18,
+    );
   }
+
+  const extractableAmount = BigInt(erc1155TokenBalance) + pullableAmount;
 
   // Finally, get the amount in current static units
   const inflationaryValue = await convertDemurrageToInflationary(
@@ -1051,69 +1056,104 @@ async function requireTokens(
   tokenAddress: string,
   tokenAmount: bigint,
 ): Promise<boolean> {
-  if (!arbBot.groupMembersCache) return false;
-  const balances = await getBotBalances(arbBot.groupMembersCache.members);
-
-  if (!balances) return false;
-
-  // @todo check if token is from member
-  // Increase the token amount slightly to account for precision issues.
-  tokenAmount += REQUIRE_PRECISION;
-
-  // @todo replace with the balances array check
-  // Get the current token balance for the bot.
-  const initialTokenBalance = await getBotErc20Balance(tokenAddress);
-  if (initialTokenBalance >= tokenAmount) {
-    return true;
-  }
-
-  // Calculate the lacking amount.
-  const lackingAmount = tokenAmount - initialTokenBalance;
-
+  tokenAddress = tokenAddress.toLowerCase();
   // Retrieve the bot's balance in wrappable form.
   const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
 
-  const staticBalance = balances.filter(
-    (balance) =>
-      tokenAvatar.toLowerCase() === balance.tokenOwner &&
-      balance.isErc1155 === true,
-  );
-  let tokensToWrapBalance = BigInt(0);
-  if (staticBalance.length) {
-    tokensToWrapBalance = BigInt(staticBalance[0].staticAttoCircles);
-  }
+  // @todo check if token is from member
+  // Increase the token amount slightly to account for precision issues.
+  // @todo Check that this does not imply we're asking for more than we can get.
+  // tokenAmount; += REQUIRE_PRECISION;
 
-  // If the available wrappable tokens are insufficient, attempt to mint additional tokens.
-  if (tokensToWrapBalance < lackingAmount) {
-    const tokensToMint = lackingAmount - tokensToWrapBalance;
-
-    let mintSucceeded = false;
-    if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress) {
-      // Mint tokens from members excluding the group address.
-      // @todo update naming
-      mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
-    } else {
-      // Use the mint + redeem flow for other tokens.
-      mintSucceeded = await mintIfPossibleFromOthers(
-        tokensToMint,
-        balances,
-        tokenAvatar,
-        tokenAddress,
-      );
-    }
-    if (!mintSucceeded) {
-      return false;
-    }
-  }
-
-  // Convert the lacking amount to a demurrage-adjusted value to prevent precision overshoots.
-  const convertedAmount = await convertInflationaryToDemurrage(
+  // Convert the required amount to demurrage units
+  const tokenAmountDemurragedUnits = await convertInflationaryToDemurrage(
     tokenAddress,
-    lackingAmount - REQUIRE_PRECISION,
+    tokenAmount,
   );
 
+  // fetch the bot's token botBalances
+  // @todo this could probably be cached
+  const balances = await circlesData.getTokenBalances(arbBot.address);
+  if (!balances) return false;
+
+  // get the current erc1155 balance
+  const erc1155TokenBalance =
+    balances.find(
+      (token: TokenBalanceRow) =>
+        token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
+    )?.attoCircles ?? 0;
+
+  //caluculate the missing amount in demurraged units
+  const missingAmountDemurragedUnits =
+    tokenAmountDemurragedUnits - BigInt(erc1155TokenBalance);
+
+  if (tokenAddress === arbBot.groupTokenAddress) {
+    await arbBot.avatar.transfer(
+      mintHandlerAddress,
+      missingAmountDemurragedUnits,
+      undefined,
+      true,
+      undefined,
+      undefined,
+    );
+  } else {
+    await arbBot.avatar.transfer(
+      arbBot.address,
+      missingAmountDemurragedUnits,
+      undefined,
+      true,
+      undefined,
+      [tokenAvatar],
+    );
+  }
+
+  // since some of the existing erc20 tokens might have become unwrapped by the pathfinder during the above transfer,
+  // we now need to wrap the whole required amount (as stated in the demurragedUnits), which should result in the required Static Amount.
   console.log("Wrapping tokens");
-  await arbBot.avatar.wrapInflationErc20(tokenAvatar, convertedAmount);
+  await arbBot.avatar.wrapInflationErc20(
+    tokenAvatar,
+    tokenAmountDemurragedUnits,
+  );
+
+  // // @todo replace with the balances array check
+  // // Get the current token balance for the bot.
+  // const initialTokenBalance = await getBotErc20Balance(tokenAddress);
+  // if (initialTokenBalance >= tokenAmount) {
+  //   return true;
+  // }
+
+  // const staticBalance = balances.filter(
+  //   (balance) =>
+  //     tokenAvatar.toLowerCase() === balance.tokenOwner &&
+  //     balance.isErc1155 === true,
+  // );
+  // let tokensToWrapBalance = BigInt(0);
+  // if (staticBalance.length) {
+  //   tokensToWrapBalance = BigInt(staticBalance[0].staticAttoCircles);
+  // }
+
+  // // If the available wrappable tokens are insufficient, attempt to mint additional tokens.
+  // if (tokensToWrapBalance < lackingAmount) {
+  //   const tokensToMint = lackingAmount - tokensToWrapBalance;
+
+  //   let mintSucceeded = false;
+  //   if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress) {
+  //     // Mint tokens from members excluding the group address.
+  //     // @todo update naming
+  //     mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
+  //   } else {
+  //     // Use the mint + redeem flow for other tokens.
+  //     mintSucceeded = await mintIfPossibleFromOthers(
+  //       tokensToMint,
+  //       balances,
+  //       tokenAvatar,
+  //       tokenAddress,
+  //     );
+  //   }
+  //   if (!mintSucceeded) {
+  //     return false;
+  //   }
+  // }
 
   return true;
 }
