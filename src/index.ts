@@ -22,6 +22,7 @@ import {
 
 import { circlesConfig, Sdk } from "@circles-sdk/sdk";
 import { CirclesData, CirclesRpc, TokenBalanceRow } from "@circles-sdk/data";
+import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
 
 import pg from "pg"; // @dev pg is a CommonJS module
 const { Client } = pg;
@@ -134,7 +135,7 @@ const baseRedemptionEncoderAddress =
  */
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 const wallet = new Wallet(botPrivateKey, provider);
-
+const contractRunner = new PrivateKeyContractRunner(provider, botPrivateKey);
 /**
  * @notice Circles SDK configuration objects.
  * @dev selectedCirclesConfig contains configuration details for the current chain.
@@ -1077,38 +1078,53 @@ async function requireTokens(
   if (!balances) return false;
 
   // get the current erc1155 balance
-  const erc1155TokenBalance =
+  let erc1155TokenBalance =
     balances.find(
       (token: TokenBalanceRow) =>
         token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
     )?.attoCircles ?? 0;
 
-  //caluculate the missing amount in demurraged units
+  // // to avoid porecision errors and mismatch problems, we truncate the balance to the 6 decimals. THis is inconsistent in general
+  // // since I did not do that when the theoretically available Amount was fetched.
+  // erc1155TokenBalance =
+  //   (BigInt(erc1155TokenBalance) / BigInt(1e11)) * BigInt(1e11);
+
+  //calculate the missing amount in demurraged units
   const missingAmountDemurragedUnits =
     tokenAmountDemurragedUnits - BigInt(erc1155TokenBalance);
 
-  if (tokenAddress === arbBot.groupTokenAddress) {
-    await arbBot.avatar.transfer(
-      mintHandlerAddress,
-      missingAmountDemurragedUnits,
-      undefined,
-      undefined,
-      true,
-      undefined,
-      undefined,
-    );
-  } else {
-    await arbBot.avatar.transfer(
-      arbBot.address,
-      missingAmountDemurragedUnits,
-      undefined,
-      undefined,
-      true,
-      undefined,
-      [tokenAvatar],
-    );
-  }
+  const transferRequired = missingAmountDemurragedUnits > BigInt(0);
 
+  console.log(
+    "Transfer requried:",
+    transferRequired,
+    "missing Amount:",
+    missingAmountDemurragedUnits,
+  );
+
+  if (transferRequired) {
+    if (tokenAddress === arbBot.groupTokenAddress) {
+      await arbBot.avatar.transfer(
+        mintHandlerAddress,
+        missingAmountDemurragedUnits,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        undefined,
+      );
+    } else {
+      await arbBot.avatar.transfer(
+        arbBot.address,
+        missingAmountDemurragedUnits,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        [tokenAvatar],
+      );
+    }
+  }
   // since some of the existing erc20 tokens might have become unwrapped by the pathfinder during the above transfer,
   // we now need to wrap the whole required amount (as stated in the demurragedUnits), which should result in the required Static Amount.
   console.log("Wrapping tokens");
@@ -1350,7 +1366,10 @@ function toTokenId(address: string): bigint {
  * @return {Promise<void>} A promise that never resolves unless an unhandled error occurs.
  */
 async function main() {
-  sdk = new Sdk(wallet, selectedCirclesConfig);
+  console.log(selectedCirclesConfig);
+  const contractRunner = new PrivateKeyContractRunner(provider, botPrivateKey);
+  await contractRunner.init();
+  sdk = new Sdk(contractRunner, selectedCirclesConfig);
   const botAvatar = await sdk.getAvatar(arbBot.address);
   arbBot = {
     ...arbBot,
