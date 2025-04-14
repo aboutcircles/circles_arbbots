@@ -695,6 +695,17 @@ async function theoreticallyAvailableAmountCRC(
     extractableAmount,
   );
 
+  console.log(
+    "target token: ",
+    tokenAddress,
+    "\n existing erc155 balance: ",
+    erc1155TokenBalance,
+    "\n achievable additional erc1155 balance: ",
+    pullableAmount,
+    "\n total pullable amount in erc20 units: ",
+    inflationaryValue,
+  );
+
   return inflationaryValue;
 }
 
@@ -1096,9 +1107,15 @@ async function requireTokens(
   const transferRequired = missingAmountDemurragedUnits > BigInt(0);
 
   console.log(
-    "Transfer requried:",
-    transferRequired,
-    "missing Amount:",
+    "target token: ",
+    tokenAddress,
+    "\n target amount in erc20 units: ",
+    tokenAmount,
+    "\n target amount in erc1155 units: ",
+    tokenAmountDemurragedUnits,
+    "\n existing balance in erc1155 units: ",
+    erc1155TokenBalance,
+    "\n missing balance in erc115 units: ",
     missingAmountDemurragedUnits,
   );
 
