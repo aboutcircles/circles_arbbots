@@ -1089,11 +1089,12 @@ async function requireTokens(
   if (!balances) return false;
 
   // get the current erc1155 balance
-  let erc1155TokenBalance =
+  let erc1155TokenBalance = BigInt(
     balances.find(
       (token: TokenBalanceRow) =>
-        token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
-    )?.attoCircles ?? 0;
+        token.tokenAddress.toLowerCase() === tokenAvatar && token.version === 2,
+    )?.attoCircles ?? 0,
+  );
 
   // // to avoid porecision errors and mismatch problems, we truncate the balance to the 6 decimals. THis is inconsistent in general
   // // since I did not do that when the theoretically available Amount was fetched.
@@ -1102,7 +1103,7 @@ async function requireTokens(
 
   //calculate the missing amount in demurraged units
   const missingAmountDemurragedUnits =
-    tokenAmountDemurragedUnits - BigInt(erc1155TokenBalance);
+    tokenAmountDemurragedUnits - erc1155TokenBalance;
 
   const transferRequired = missingAmountDemurragedUnits > BigInt(0);
 
@@ -1120,35 +1121,64 @@ async function requireTokens(
   );
 
   if (transferRequired) {
-    if (tokenAddress === arbBot.groupTokenAddress) {
-      await arbBot.avatar.transfer(
-        mintHandlerAddress,
-        missingAmountDemurragedUnits,
-        undefined,
-        undefined,
-        true,
-        undefined,
-        undefined,
-      );
-    } else {
-      await arbBot.avatar.transfer(
-        arbBot.address,
-        missingAmountDemurragedUnits,
-        undefined,
-        undefined,
-        true,
-        undefined,
-        [tokenAvatar],
-      );
+    try {
+      let transferReceipt;
+
+      if (tokenAddress === arbBot.groupTokenAddress) {
+        console.log("Attempting transfer to minthandler");
+        transferReceipt = await arbBot.avatar.transfer(
+          mintHandlerAddress,
+          missingAmountDemurragedUnits,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          undefined,
+        );
+      } else {
+        console.log("Attempting transfer to self");
+        transferReceipt = await arbBot.avatar.transfer(
+          arbBot.address,
+          missingAmountDemurragedUnits,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          [tokenAvatar],
+        );
+      }
+
+      if (!transferReceipt || transferReceipt.status === 0) {
+        console.error("Transfer failed");
+        return false;
+      }
+    } catch (error) {
+      console.error("Transfer failed:", error);
+      return false;
     }
   }
+
+  // Only proceed with wrapping if transfer was successful or not required
+
   // since some of the existing erc20 tokens might have become unwrapped by the pathfinder during the above transfer,
   // we now need to wrap the whole required amount (as stated in the demurragedUnits), which should result in the required Static Amount.
-  console.log("Wrapping tokens");
-  await arbBot.avatar.wrapInflationErc20(
-    tokenAvatar,
-    tokenAmountDemurragedUnits,
-  );
+  try {
+    console.log("Wrapping tokens");
+    const wrapReceipt = await arbBot.avatar.wrapInflationErc20(
+      tokenAvatar,
+      tokenAmountDemurragedUnits,
+    );
+
+    if (!wrapReceipt || wrapReceipt.status === 0) {
+      console.error("Wrapping failed");
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error("Wrapping failed:", error);
+    return false;
+  }
 
   // // @todo replace with the balances array check
   // // Get the current token balance for the bot.
@@ -1192,7 +1222,6 @@ async function requireTokens(
 
   return true;
 }
-
 /**
  * @notice Converts an inflationary token amount to its corresponding demurrage-adjusted value.
  * @param tokenAddress The address of the inflationary token.
