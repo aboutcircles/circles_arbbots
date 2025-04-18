@@ -7,6 +7,7 @@ export interface Bot {
   groupTokenAddress?: string;
   redeemOperatorContract?: Contract;
   baseRedemptionEncoderContract?: Contract;
+  bouncerOrgContract?: Contract;
   groupAddress: string;
   groupMembersCache: MembersCache;
   address: string;

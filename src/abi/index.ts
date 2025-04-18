@@ -30,74 +30,90 @@ export const erc20Abi = [
 ];
 
 export const hubV2Abi = [
-    {
-        constant: true,
-        inputs: [
-            { name: "", type: "address" }
-        ],
-        name: "treasuries",
-        outputs: [
-            { name: "", type: "address" }
-        ],
-        payable: false,
-        stateMutability: "view",
-        type: "function"
-    },
-    {
-        constant: true,
-        inputs: [
-            { name: "_owner", type: "address" },
-            { name: "_id", type: "uint256" }
-        ],
-        name: "balanceOf",
-        outputs: [{ name: "balance", type: "uint256" }],
-        stateMutability: "view",
-        type: "function",
-    },
-    {
-        constant: false,
-        inputs: [
-          { name: "operator", type: "address" },
-          { name: "approved", type: "bool" }
-        ],
-        name: "setApprovalForAll",
-        outputs: [],
-        stateMutability: "nonpayable",
-        type: "function"
-    },
-    {
-      type: "function",
-      name: "safeTransferFrom",
-      inputs: [
-        {
-          name: "_from",
-          type: "address",
-          internalType: "address"
-        },
-        {
-          name: "_to",
-          type: "address",
-          internalType: "address"
-        },
-        {
-          name: "_id",
-          type: "uint256",
-          internalType: "uint256"
-        },
-        {
-          name: "_value",
-          type: "uint256",
-          internalType: "uint256"
-        },
-        {
-          name: "_data",
-          type: "bytes",
-          internalType: "bytes"
-        }
-      ],
-      outputs: [],
-      stateMutability: "nonpayable"
-    }
+  {
+    constant: true,
+    inputs: [{ name: "", type: "address" }],
+    name: "treasuries",
+    outputs: [{ name: "", type: "address" }],
+    payable: false,
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    constant: true,
+    inputs: [
+      { name: "_owner", type: "address" },
+      { name: "_id", type: "uint256" },
+    ],
+    name: "balanceOf",
+    outputs: [{ name: "balance", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    constant: false,
+    inputs: [
+      { name: "operator", type: "address" },
+      { name: "approved", type: "bool" },
+    ],
+    name: "setApprovalForAll",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    type: "function",
+    name: "safeTransferFrom",
+    inputs: [
+      {
+        name: "_from",
+        type: "address",
+        internalType: "address",
+      },
+      {
+        name: "_to",
+        type: "address",
+        internalType: "address",
+      },
+      {
+        name: "_id",
+        type: "uint256",
+        internalType: "uint256",
+      },
+      {
+        name: "_value",
+        type: "uint256",
+        internalType: "uint256",
+      },
+      {
+        name: "_data",
+        type: "bytes",
+        internalType: "bytes",
+      },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    inputs: [
+      { name: "_truster", type: "address" },
+      { name: "_trustee", type: "address" },
+    ],
+    name: "isTrusted",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view",
+    type: "function",
+  },
+];
+
+export const bouncerOrgAbi = [
+  {
+    inputs: [{ name: "trustee", type: "address", internalType: "address" }],
+    name: "forceTrust",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
 ];
 
 export const groupTreasuryAbi = [
@@ -142,34 +158,32 @@ export const groupRedeemAbi = [
 ];
 
 export const groupContractAbi = [
-    {
-        type: "function",
-        name: "redemptionHandler",
-        inputs: [],
-        outputs: [
-            {
-                name: "",
-                type: "address",
-                internalType:"address"
-            }
-        ],
-        stateMutability: "view"
-    }
+  {
+    type: "function",
+    name: "redemptionHandler",
+    inputs: [],
+    outputs: [
+      {
+        name: "",
+        type: "address",
+        internalType: "address",
+      },
+    ],
+    stateMutability: "view",
+  },
 ];
 
 export const erc20LiftAbi = [
-    {
-        inputs: [
-            { internalType: "uint8", name: "", type: "uint8" },
-            { internalType: "address", name: "", type: "address" }
-        ],
-        name: "erc20Circles",
-        outputs: [
-            { internalType: "address", name: "", type: "address" }
-        ],
-        stateMutability: "view",
-        type: "function"
-    }
+  {
+    inputs: [
+      { internalType: "uint8", name: "", type: "uint8" },
+      { internalType: "address", name: "", type: "address" },
+    ],
+    name: "erc20Circles",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
 ];
 
 export const inflationaryTokenAbi = [
