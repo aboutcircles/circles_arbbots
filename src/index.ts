@@ -593,8 +593,19 @@ async function swapUsingBalancer(
   const callData = swap.buildCall(buildInput) as SwapBuildOutputExactOut;
 
   // @dev the last check to make sure that the amountIn is smaller than amountOut - epsilon
-  if (callData.maxAmountIn.amount > swap.outputAmount.amount - EPSILON)
+  // This is in case the situation changed since the time we picked the deal as a candidate.
+  if (callData.maxAmountIn.amount > swap.outputAmount.amount - EPSILON) {
+    console.log(
+      "Input Amount",
+      callData.maxAmountIn.amount,
+      " Output Amount:",
+      swap.outputAmount.amount,
+      " EPSILON: ",
+      EPSILON,
+    );
+    console.log("returning before executing");
     return false;
+  }
 
   console.log(
     `
@@ -656,38 +667,55 @@ async function theoreticallyAvailableAmountCRC(
   let erc1155TokenBalance =
     balances.find(
       (token: TokenBalanceRow) =>
-        token.tokenOwner.toLowerCase() === tokenAvatar && token.version === 2,
+        token.tokenOwner.toLowerCase() === tokenAvatar &&
+        token.version === 2 &&
+        token.isErc1155,
     )?.attoCircles ?? 0;
 
-  // find out how many tokens we can turn to the target token via the pathfinder
-  let pullableAmount = BigInt(0);
+  // get the current erc20 balance (in demurraged units)
+  let erc20TokenBalance =
+    balances.find(
+      (token: TokenBalanceRow) =>
+        token.tokenOwner.toLowerCase() === tokenAvatar &&
+        token.version === 2 &&
+        token.isErc20,
+    )?.attoCircles ?? 0;
 
-  // if the target token is a group token, we request the pathfinder to the mint handler
-  if (tokenAddress === arbBot.groupTokenAddress) {
-    pullableAmount += BigInt(
-      (await arbBot.avatar.getMaxTransferableAmount(
-        mintHandlerAddress,
-        undefined,
-        true,
-        undefined,
-        undefined,
-      )) *
-        10 ** 18,
+  // find out how many tokens we can turn to the target token via the pathfinder, excluding the existing target balances
+  const remainingTokens = balances
+    .map((b: TokenBalanceRow) => b.tokenAddress.toLowerCase())
+    .filter(
+      (address: string) =>
+        address !== tokenAddress.toLowerCase() &&
+        address !== tokenAvatar.toLowerCase(),
     );
-  } else {
-    pullableAmount += BigInt(
-      (await arbBot.avatar.getMaxTransferableAmount(
-        arbBot.address,
-        undefined,
-        true,
-        undefined,
-        [tokenAvatar],
-      )) *
-        10 ** 18,
-    );
-  }
 
-  const extractableAmount = BigInt(erc1155TokenBalance) + pullableAmount;
+  const toAddress =
+    tokenAvatar === arbBot.groupAddress ? mintHandlerAddress : arbBot.address;
+
+  const toTokens =
+    tokenAvatar === arbBot.groupAddress ? undefined : [tokenAvatar];
+
+  const maxTransferable = await arbBot.avatar.getMaxTransferableAmount(
+    toAddress,
+    undefined,
+    true,
+    remainingTokens,
+    toTokens,
+  );
+
+  const pullableAmountString = (maxTransferable * 1e18).toFixed(0);
+  const pullableAmount = BigInt(pullableAmountString);
+
+  // Round down to 6 decimal places (12 trailing zeros). The reason for this is a bit subtle, but basically
+  // the sdk, which is being used to perform these transactions, sometimes throws errors if the inputs
+  // has too many significant digits. By reducing the pullable Amount here, we can ensure that we can later
+  // perform an actual transfer that is both sufficiently high for the desired deal and also definitely below the actual pullable Amount.
+  const roundedPullableAmount = (pullableAmount / BigInt(1e12)) * BigInt(1e12);
+  const extractableAmount =
+    BigInt(erc1155TokenBalance) +
+    BigInt(erc20TokenBalance) +
+    roundedPullableAmount;
 
   // Finally, get the amount in current static units
   const inflationaryValue = await convertDemurrageToInflationary(
@@ -850,16 +878,17 @@ async function amountOutGuesser(
  * @return {Promise<Deal>} A promise that resolves to a Deal object containing flags for profitability/executability and associated swap data.
  */
 async function pickDeal(member: GroupMember): Promise<Deal> {
-  let isProfitable = true;
-  let isExecutable = false;
+  // let isProfitable = true;
   let amountIn = member.latestPrice ?? BigInt(0);
   let direction = ArbDirection.BUY_MEMBER_TOKENS;
   let swapData = null;
   let amountOut = MIN_EXTRACTABLE_AMOUNT;
 
-  // If there's no price yet or if it's higher than the minimum threshold plus precision allowance
-  if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT + EPSILON) {
+  // If there's no price yet or if it's larger than one, we flip the direction of the trade
+  // and update the quote (for the default direction we don't need to as we've just done so)
+  if (amountIn === BigInt(0) || amountIn > MIN_EXTRACTABLE_AMOUNT) {
     direction = ArbDirection.BUY_GROUP_TOKENS;
+    // Update the quotes
     swapData = await fetchBalancerQuote({
       tokenAddress: member.tokenAddress,
       direction: direction,
@@ -867,44 +896,35 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
     });
     amountIn = swapData?.inputAmount.amount ?? BigInt(0);
     amountOut = swapData?.outputAmount.amount ?? BigInt(0);
-    if (amountIn === BigInt(0) || amountIn > amountOut - EPSILON) {
-      isProfitable = false;
-    }
-  }
-  // If the price is lower than the minimum threshold
-  else if (amountIn < MIN_EXTRACTABLE_AMOUNT - EPSILON) {
-    // Proceed with fetching the swap quote in the default direction
-    swapData = await fetchBalancerQuote({
-      tokenAddress: member.tokenAddress,
-      direction: direction,
-    });
+
+    // if (amountIn === BigInt(0) || amountIn > amountOut - EPSILON) {
+    //   isProfitable = false;
+    // }
   }
 
-  // Check if the bot has enough tokens to execute the swap
-  if (isProfitable) {
-    const recommendedSwapData = await amountOutGuesser(
-      member.tokenAddress,
-      direction,
-      amountIn,
-    );
-    swapData = recommendedSwapData ?? swapData;
-
-    amountIn = swapData?.inputAmount.amount ?? BigInt(0);
-    amountOut = swapData?.outputAmount.amount ?? BigInt(0);
+  // If we don't see a good initial ratio, we return
+  // @todo: Epsilon should more sensibly check the ratio, not the difference
+  if (amountIn > MIN_EXTRACTABLE_AMOUNT - EPSILON) {
+    return {
+      isProfitable: false,
+      swapData,
+    };
   }
 
-  if (amountIn >= amountOut - EPSILON) {
-    isProfitable = false;
-  } else {
-    // @todo prettify this check
-    isExecutable = await requireTokens(
-      swapData?.inputAmount.token.address || "",
-      amountIn,
-    );
-  }
+  // Find the optimal data for the deal
+  const recommendedSwapData = await amountOutGuesser(
+    member.tokenAddress,
+    direction,
+    amountIn,
+  );
+
+  // update the candidate swap
+  swapData = recommendedSwapData ?? swapData;
+  amountIn = swapData?.inputAmount.amount ?? BigInt(0);
+  amountOut = swapData?.outputAmount.amount ?? BigInt(0);
 
   return {
-    isProfitable: isProfitable && isExecutable,
+    isProfitable: amountIn <= amountOut - EPSILON,
     swapData,
   };
 }
@@ -1068,16 +1088,14 @@ async function requireTokens(
   tokenAddress: string,
   tokenAmount: bigint,
 ): Promise<boolean> {
-  tokenAddress = tokenAddress.toLowerCase();
-  // Retrieve the bot's balance in wrappable form.
-  const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
-
   // @todo check if token is from member
   // Increase the token amount slightly to account for precision issues.
   // @todo Check that this does not imply we're asking for more than we can get.
   // tokenAmount; += REQUIRE_PRECISION;
 
-  // Convert the required amount to demurrage units
+  tokenAddress = tokenAddress.toLowerCase();
+  const tokenAvatar = await getERC20TokenAvatar(tokenAddress);
+
   const tokenAmountDemurragedUnits = await convertInflationaryToDemurrage(
     tokenAddress,
     tokenAmount,
@@ -1088,66 +1106,83 @@ async function requireTokens(
   const balances = await circlesData.getTokenBalances(arbBot.address);
   if (!balances) return false;
 
-  // get the current erc1155 balance
+  // get the current erc1155 balance (in demurraged units)
   let erc1155TokenBalance = BigInt(
     balances.find(
       (token: TokenBalanceRow) =>
-        token.tokenAddress.toLowerCase() === tokenAvatar && token.version === 2,
+        token.tokenOwner.toLowerCase() === tokenAvatar &&
+        token.version === 2 &&
+        token.isErc1155,
     )?.attoCircles ?? 0,
   );
 
-  // // to avoid porecision errors and mismatch problems, we truncate the balance to the 6 decimals. THis is inconsistent in general
-  // // since I did not do that when the theoretically available Amount was fetched.
-  // erc1155TokenBalance =
-  //   (BigInt(erc1155TokenBalance) / BigInt(1e11)) * BigInt(1e11);
-
-  //calculate the missing amount in demurraged units
-  const missingAmountDemurragedUnits =
-    tokenAmountDemurragedUnits - erc1155TokenBalance;
-
-  const transferRequired = missingAmountDemurragedUnits > BigInt(0);
-
-  console.log(
-    "target token: ",
-    tokenAddress,
-    "\n target amount in erc20 units: ",
-    tokenAmount,
-    "\n target amount in erc1155 units: ",
-    tokenAmountDemurragedUnits,
-    "\n existing balance in erc1155 units: ",
-    erc1155TokenBalance,
-    "\n missing balance in erc115 units: ",
-    missingAmountDemurragedUnits,
+  // get the current erc20 balance (in demurraged units)
+  let erc20TokenBalance = BigInt(
+    balances.find(
+      (token: TokenBalanceRow) =>
+        token.tokenOwner.toLowerCase() === tokenAvatar &&
+        token.version === 2 &&
+        token.isErc20,
+    )?.attoCircles ?? 0,
   );
 
-  if (transferRequired) {
+  //calculate the missing amount in demurraged units
+  let missingAmountDemurragedUnits =
+    tokenAmountDemurragedUnits - erc20TokenBalance;
+
+  console.log(`
+    erc1155TokenBalance: ${erc1155TokenBalance}
+    erc20TokenBalance: ${erc20TokenBalance}
+    missingAmountDemurragedUnits: ${missingAmountDemurragedUnits}
+    requested demurraged units: ${tokenAmountDemurragedUnits}
+    request amount in static units: ${tokenAmount}
+  `);
+
+  if (missingAmountDemurragedUnits <= 0) {
+    // sufficient erc20 balance
+    console.log("No additional tokens required");
+    return true;
+  } else if (missingAmountDemurragedUnits > erc1155TokenBalance) {
+    // we need to obtain some additional erc1155 balance
+    console.log("Pulling additional tokens through pathfinder.");
+    const amountToPull = missingAmountDemurragedUnits - erc1155TokenBalance;
+
+    // we here actually pull a little bit more than we'd need to deal with the sdk limitations.
+    // Because we previously rounded the theorteicallyAvailableAmount *down* we are actually guaranteed
+    // that this won't cause any problems.
+    const sigFigs = BigInt(1e12);
+    const roundedAmountToPull =
+      ((amountToPull + sigFigs - BigInt(1)) / sigFigs) * sigFigs;
+
+    const remainingTokens = balances
+      .map((b: TokenBalanceRow) => b.tokenAddress.toLowerCase())
+      .filter(
+        (address: string) =>
+          address !== tokenAddress.toLowerCase() &&
+          address !== tokenAvatar.toLowerCase(),
+      );
+    const toAddress =
+      tokenAvatar === arbBot.groupAddress ? mintHandlerAddress : arbBot.address;
+
+    const toTokens =
+      tokenAvatar === arbBot.groupAddress ? undefined : [tokenAvatar];
+
     try {
-      let transferReceipt;
-
-      if (tokenAddress === arbBot.groupTokenAddress) {
-        console.log("Attempting transfer to minthandler");
-        transferReceipt = await arbBot.avatar.transfer(
-          mintHandlerAddress,
-          missingAmountDemurragedUnits,
-          undefined,
-          undefined,
-          true,
-          undefined,
-          undefined,
-        );
-      } else {
-        console.log("Attempting transfer to self");
-        transferReceipt = await arbBot.avatar.transfer(
-          arbBot.address,
-          missingAmountDemurragedUnits,
-          undefined,
-          undefined,
-          true,
-          undefined,
-          [tokenAvatar],
-        );
-      }
-
+      console.log(`
+        toAddress: ${toAddress},
+        roundedAmountToPull: ${roundedAmountToPull},
+        remainingTokens: ${remainingTokens},
+        toTokens: ${toTokens}
+      `);
+      const transferReceipt = await arbBot.avatar.transfer(
+        toAddress,
+        roundedAmountToPull,
+        undefined,
+        undefined,
+        true,
+        remainingTokens,
+        toTokens,
+      );
       if (!transferReceipt || transferReceipt.status === 0) {
         console.error("Transfer failed");
         return false;
@@ -1158,15 +1193,12 @@ async function requireTokens(
     }
   }
 
-  // Only proceed with wrapping if transfer was successful or not required
-
-  // since some of the existing erc20 tokens might have become unwrapped by the pathfinder during the above transfer,
-  // we now need to wrap the whole required amount (as stated in the demurragedUnits), which should result in the required Static Amount.
+  // finally we unwrap any outstanding amounts
   try {
     console.log("Wrapping tokens");
     const wrapReceipt = await arbBot.avatar.wrapInflationErc20(
       tokenAvatar,
-      tokenAmountDemurragedUnits,
+      missingAmountDemurragedUnits,
     );
 
     if (!wrapReceipt || wrapReceipt.status === 0) {
@@ -1179,6 +1211,73 @@ async function requireTokens(
     console.error("Wrapping failed:", error);
     return false;
   }
+
+  // // to avoid porecision errors and mismatch problems, we truncate the balance to the 6 decimals. THis is inconsistent in general
+  // // since I did not do that when the theoretically available Amount was fetched.
+  // erc1155TokenBalance =
+  //   (BigInt(erc1155TokenBalance) / BigInt(1e11)) * BigInt(1e11);
+
+  // const transferRequired = missingAmountDemurragedUnits > BigInt(0);
+
+  // if (transferRequired) {
+  //   try {
+  //     let transferReceipt;
+
+  //     if (tokenAddress === arbBot.groupTokenAddress) {
+  //       console.log("Attempting transfer to minthandler");
+  //       transferReceipt = await arbBot.avatar.transfer(
+  //         mintHandlerAddress,
+  //         missingAmountDemurragedUnits,
+  //         undefined,
+  //         undefined,
+  //         true,
+  //         undefined,
+  //         undefined,
+  //       );
+  //     } else {
+  //       console.log("Attempting transfer to self");
+  //       transferReceipt = await arbBot.avatar.transfer(
+  //         arbBot.address,
+  //         missingAmountDemurragedUnits,
+  //         undefined,
+  //         undefined,
+  //         true,
+  //         undefined,
+  //         [tokenAvatar],
+  //       );
+  //     }
+
+  //     if (!transferReceipt || transferReceipt.status === 0) {
+  //       console.error("Transfer failed");
+  //       return false;
+  //     }
+  //   } catch (error) {
+  //     console.error("Transfer failed:", error);
+  //     return false;
+  //   }
+  // }
+
+  // Only proceed with wrapping if transfer was successful or not required
+
+  // since some of the existing erc20 tokens might have become unwrapped by the pathfinder during the above transfer,
+  // we now need to wrap the whole required amount (as stated in the demurragedUnits), which should result in the required Static Amount.
+  // try {
+  //   console.log("Wrapping tokens");
+  //   const wrapReceipt = await arbBot.avatar.wrapInflationErc20(
+  //     tokenAvatar,
+  //     tokenAmountDemurragedUnits,
+  //   );
+
+  //   if (!wrapReceipt || wrapReceipt.status === 0) {
+  //     console.error("Wrapping failed");
+  //     return false;
+  //   }
+
+  //   return true;
+  // } catch (error) {
+  //   console.error("Wrapping failed:", error);
+  //   return false;
+  // }
 
   // // @todo replace with the balances array check
   // // Get the current token balance for the bot.
@@ -1340,6 +1439,7 @@ async function approveTokens(
  * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
  */
 async function execDeal(deal: Deal): Promise<boolean> {
+  console.log("Executing deal");
   if (deal.swapData) {
     const tokenAddressToApprove = deal.swapData.inputAmount.token.address;
     // If the token has not been approved yet, set the maximum allowance.
@@ -1438,9 +1538,14 @@ async function main() {
           const member = arbBot.groupMembersCache.members[i];
           const deal = await pickDeal(member);
           if (deal.isProfitable) {
+            console.log("Checking required additional required tokens");
+            const requiredTokensAvailable = await requireTokens(
+              deal.swapData?.inputAmount.token.address || "",
+              deal.swapData?.inputAmount.amount!,
+            );
+
             if (LOG_ACTIVITY) {
               const dealData = deal.swapData;
-
               const logValues = [
                 Math.floor(Date.now() / 1000),
                 dealData?.inputAmount.token.address,
@@ -1448,10 +1553,15 @@ async function main() {
                 dealData?.inputAmount.amount.toString(),
                 dealData?.outputAmount.amount.toString(),
               ];
+
+              console.log("Candidate deal data:", logValues);
+
               await loggerClient.query(logQuery, logValues);
             }
-            const executionResult = await execDeal(deal);
-            if (executionResult) pauseExecution = false;
+            if (requiredTokensAvailable) {
+              const executionResult = await execDeal(deal);
+              if (executionResult) pauseExecution = false;
+            }
           }
         }
       } catch (error) {
