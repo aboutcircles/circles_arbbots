@@ -46,6 +46,7 @@ import {
   groupContractAbi,
   inflationaryTokenAbi,
   baseRedemptionEncoderAbi,
+  bouncerOrgAbi,
 } from "./abi/index.js";
 
 /**
@@ -127,7 +128,7 @@ const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
 const baseRedemptionEncoderAddress =
   "0x59f6e1B5E6F1448ffBEB99cd164304014fb78A31";
-
+const crcBouncerOrgAddress = "0x98B1e32Af39C1d3a33A9a2b7fe167b1b4a190872";
 /**
  * @notice Initializes core blockchain objects.
  * @dev provider connects to the blockchain via the JSON RPC URL.
@@ -168,6 +169,11 @@ let arbBot: Bot = {
     baseRedemptionEncoderContract: new Contract(
       baseRedemptionEncoderAddress,
       baseRedemptionEncoderAbi,
+      wallet,
+    ),
+    bouncerOrgContract: new Contract(
+      crcBouncerOrgAddress,
+      bouncerOrgAbi,
       wallet,
     ),
     approvedTokens: [],
@@ -643,6 +649,38 @@ async function swapUsingBalancer(
 }
 
 /**
+ * @notice Updates trust relationships with the bouncer organization for specified addresses
+ * @param toTokens address to establish trust with
+ * @return {Promise<boolean>} Returns true if rust relationships is successfully established
+ */
+async function updateBouncerOrgTrust(tokenAvatar: string): Promise<boolean> {
+  if (!arbBot.bouncerOrgContract) {
+    console.error("Bouncer org contract not initialized");
+    return false;
+  }
+
+  try {
+    // Check if trust already exists
+    const isTrusted = await hubV2Contract.isTrusted(
+      crcBouncerOrgAddress,
+      tokenAvatar,
+    );
+
+    if (!isTrusted) {
+      // Force trust using the bouncer org contract
+      const tx = await arbBot.bouncerOrgContract.forceTrust(tokenAvatar);
+      await tx.wait();
+      console.log(`Bouncer Org forceTrusted: ${tokenAvatar}`);
+    }
+
+    return true;
+  } catch (error) {
+    console.error("Error updating bouncer org trust:", error);
+    return false;
+  }
+}
+
+/**
  * @notice Calculates the total theoretical amount of tokens that could be available,
  *         combining the bot’s current ERC20 balance, tokens available in wrappable erc1155 form,
  *         and tokens that could potentially be minted from member balances.
@@ -690,11 +728,17 @@ async function theoreticallyAvailableAmountCRC(
         address !== tokenAvatar.toLowerCase(),
     );
 
-  const toAddress =
-    tokenAvatar === arbBot.groupAddress ? mintHandlerAddress : arbBot.address;
+  let toAddress;
+  let toTokens;
 
-  const toTokens =
-    tokenAvatar === arbBot.groupAddress ? undefined : [tokenAvatar];
+  if (tokenAvatar === arbBot.groupAddress) {
+    toAddress = mintHandlerAddress;
+    toTokens = undefined;
+  } else {
+    toAddress = crcBouncerOrgAddress;
+    toTokens = [tokenAvatar!];
+    await updateBouncerOrgTrust(tokenAvatar!);
+  }
 
   const maxTransferable = await arbBot.avatar.getMaxTransferableAmount(
     toAddress,
@@ -1161,12 +1205,18 @@ async function requireTokens(
           address !== tokenAddress.toLowerCase() &&
           address !== tokenAvatar.toLowerCase(),
       );
-    const toAddress =
-      tokenAvatar === arbBot.groupAddress ? mintHandlerAddress : arbBot.address;
 
-    const toTokens =
-      tokenAvatar === arbBot.groupAddress ? undefined : [tokenAvatar];
+    let toAddress;
+    let toTokens;
 
+    if (tokenAvatar === arbBot.groupAddress) {
+      toAddress = mintHandlerAddress;
+      toTokens = undefined;
+    } else {
+      toAddress = crcBouncerOrgAddress;
+      toTokens = [tokenAvatar!];
+      await updateBouncerOrgTrust(tokenAvatar!);
+    }
     try {
       console.log(`
         toAddress: ${toAddress},
