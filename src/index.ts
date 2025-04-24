@@ -39,7 +39,6 @@ import {
 // ABI
 import {
   groupRedeemAbi,
-  groupTreasuryAbi,
   erc20Abi,
   hubV2Abi,
   erc20LiftAbi,
@@ -56,10 +55,6 @@ import {
 // @dev EPSILON represents the minimum profit that we require from a deal.
 // If the expected profit is below this value, the deal is not considered interesting.
 const EPSILON = BigInt(1e15);
-
-// @dev REQUIRE_PRECISION is a small extra token amount added to the required token amount in the `requireTokens` function.
-// This helps mitigate issues related to precision loss during wrapping/unwrapping operations.
-const REQUIRE_PRECISION = BigInt(1e15);
 
 // @dev MIN_EXTRACTABLE_AMOUNT defines the minimum output amount that we are willing to extract on every swap,
 // regardless of the input amount.
@@ -123,11 +118,8 @@ const LOG_ACTIVITY = true;
  */
 const groupAddress = process.env.GROUP_ADDRESS!;
 const mintHandlerAddress = process.env.MINT_HANDLER_ADDRESS!;
-const redemptionOperatorAddress = process.env.REDEMPTION_OPERATOR!;
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
-const baseRedemptionEncoderAddress =
-  "0x59f6e1B5E6F1448ffBEB99cd164304014fb78A31";
 const crcBouncerOrgAddress = "0x98B1e32Af39C1d3a33A9a2b7fe167b1b4a190872";
 /**
  * @notice Initializes core blockchain objects.
@@ -161,16 +153,6 @@ const hubV2Contract = new Contract(
 let arbBot: Bot = {
     address: wallet.address,
     groupAddress: groupAddress.toLowerCase(),
-    redeemOperatorContract: new Contract(
-      redemptionOperatorAddress,
-      groupRedeemAbi,
-      wallet,
-    ),
-    baseRedemptionEncoderContract: new Contract(
-      baseRedemptionEncoderAddress,
-      baseRedemptionEncoderAbi,
-      wallet,
-    ),
     bouncerOrgContract: new Contract(
       crcBouncerOrgAddress,
       bouncerOrgAbi,
@@ -426,150 +408,6 @@ async function updateMembersCache(membersCache: MembersCache) {
 }
 
 /**
- * @notice Retrieves the bot's ERC20 token balance.
- * @param tokenAddress The address of the ERC20 token.
- * @return {Promise<bigint>} A promise that resolves to the token balance as a bigint.
- */
-async function getBotErc20Balance(tokenAddress: string): Promise<bigint> {
-  // Create a contract instance for the token
-  const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
-
-  // Fetch the balance
-  let balance = await tokenContract.balanceOf(arbBot.address);
-  return balance;
-}
-
-/**
- * @notice Mints group tokens using individual token balances by calling the Circles SDK.
- * @param tokensToMint An array of TokenBalanceRow objects representing the tokens to be minted.
- * @return {Promise<void>}
- */
-async function mintGroupTokensFromIndividualTokens(
-  tokensToMint: TokenBalanceRow[],
-) {
-  // We then mint the group tokens using the Circles SDK (https://docs.aboutcircles.com/developer-docs/circles-avatars/group-avatars/mint-group-tokens
-  // @todo filter duplications after unwrap
-  const tokenAvatars = tokensToMint.map((token) => token.tokenOwner);
-  const tokenBalances = tokensToMint.map((token) => token.attoCircles);
-  if (tokenAvatars.length > 0 && tokenAvatars.length === tokenBalances.length) {
-    await arbBot.avatar.groupMint(
-      arbBot.groupAddress,
-      tokenAvatars,
-      tokenBalances,
-      "0x",
-    );
-  }
-  // @todo filter dust amounts
-}
-
-/**
- * @notice Retrieves the maximum redeemable group token amount for a given member.
- * @param memberAddress The member's address.
- * @return {Promise<bigint>} A promise that resolves to the maximum redeemable amount.
- */
-async function getMaxRedeemableAmount(memberAddress: string): Promise<bigint> {
-  const groupTreasuryAddress = await hubV2Contract.treasuries(
-    arbBot.groupAddress,
-  );
-  const groupTreasuryContract = new Contract(
-    groupTreasuryAddress,
-    groupTreasuryAbi,
-    provider,
-  );
-  const groupVaultAddress = await groupTreasuryContract.vaults(
-    arbBot.groupAddress,
-  );
-
-  const balance = await hubV2Contract.balanceOf(
-    groupVaultAddress,
-    BigInt(memberAddress),
-  );
-  if (LOG_ACTIVITY) {
-    const logQuery = `INSERT INTO "collateralrequests" ("timestamp", "groupaddress", "memberaddress", "amount") VALUES (to_timestamp($1), $2, $3, $4)`;
-    const logValues = [
-      Math.floor(Date.now() / 1000),
-      arbBot.groupAddress,
-      memberAddress,
-      balance.toString(),
-    ];
-    await loggerClient.query(logQuery, logValues);
-  }
-  return balance;
-}
-
-/**
- * @notice Redeems group tokens for a list of members by calling the group operator contract.
- * @param memberAddresses An array of member addresses.
- * @param amounts An array of amounts to redeem corresponding to each member.
- * @return {Promise<void>}
- * @throws Will throw an error if the lengths of memberAddresses and amounts do not match.
- */
-async function redeemGroupTokens(memberAddresses: string[], amounts: bigint[]) {
-  if (memberAddresses.length != amounts.length)
-    throw new Error("Mismatch in array lengths: memberAddresses, amounts");
-  // @todo check if it is set and do not call it on every redeem
-  let tx = await hubV2Contract.setApprovalForAll(
-    arbBot.redeemOperatorContract?.target,
-    true,
-  );
-  await tx.wait();
-
-  const tokenIds = memberAddresses.map((address) => toTokenId(address));
-
-  // const sum = amounts.reduce((a, b) => a + b);
-  if (arbBot.redeemOperatorContract) {
-    tx = await arbBot.redeemOperatorContract.redeem(
-      arbBot.groupAddress,
-      tokenIds,
-      amounts,
-    );
-    await tx.wait();
-  }
-  // @todo: harden this function
-}
-
-/**
- * @notice Redeems group tokens for a list of members by formatting the parameters with "base encoding"
- * (ie. simplest encoding specifying which collateral StandardTreasury/StandardVault should return)
- * @dev this currently makes an on-chain call to a pure function on `BaseRedemptionEncoder`,
- * but this is just to demonstrate the common denominator for all (so far) existing groups.
- * @param memberAddresses An array of member addresses.
- * @param amounts An array of amounts to redeem corresponding to each member.
- * @return {Promise<void>}
- * @throws Will throw an error if the lengths of memberAddresses and amounts do not match.
- */
-async function redeemGroupTokensWithHubForBaseEncoding(
-  memberAddresses: string[],
-  amounts: bigint[],
-) {
-  if (memberAddresses.length != amounts.length)
-    throw new Error("Mismatch in array lengths: memberAddresses, amounts");
-
-  const tokenIds = memberAddresses.map((address) => toTokenId(address));
-
-  if (arbBot.baseRedemptionEncoderContract) {
-    let data =
-      await arbBot.baseRedemptionEncoderContract.structureRedemptionData(
-        tokenIds,
-        amounts,
-      );
-
-    const sum = amounts.reduce((a, b) => a + b);
-
-    let tx = await hubV2Contract.safeTransferFrom(
-      arbBot.address,
-      await hubV2Contract.treasuries(arbBot.groupAddress),
-      toTokenId(arbBot.groupAddress),
-      sum,
-      data,
-    );
-    await tx.wait();
-  } else {
-    throw new Error("No BaseRedemptionEncoder contract found");
-  }
-}
-
-/**
  * @notice Executes a swap on Balancer using the provided Swap object.
  * @param swap The Swap object containing the swap parameters and paths.
  * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
@@ -740,6 +578,7 @@ async function theoreticallyAvailableAmountCRC(
     await updateBouncerOrgTrust(tokenAvatar!);
   }
 
+  console.log("toAddress:", toAddress);
   const maxTransferable = await arbBot.avatar.getMaxTransferableAmount(
     toAddress,
     undefined,
@@ -780,48 +619,6 @@ async function theoreticallyAvailableAmountCRC(
 
   return inflationaryValue;
 }
-
-// const balances = await getBotBalances(arbBot.groupMembersCache.members);
-// if (!balances) return BigInt(0);
-
-// Get the current erc20 token balance for the bot.
-// const erc20TokenBalance = await getBotErc20Balance(tokenAddress);
-
-// const matchingBalance = balances.find(
-//   (balance) =>
-//     balance.tokenOwner === tokenAvatar && balance.isErc1155 === true,
-// );
-// // Retrieve the current ERC1155 token balance for the bot.
-// const erc1155TokenBalance = BigInt(matchingBalance?.staticAttoCircles ?? 0);
-
-// let extractableAmonut = BigInt(0);
-// if (tokenAddress === arbBot.groupTokenAddress) {
-//   // For group tokens: Sum up all member tokens since they can potentially be converted
-//   // into group tokens through the `groupMint` function.
-//   const membersTokens = balances.filter(
-//     (balance) => balance.tokenOwner !== arbBot.groupAddress,
-//   );
-//   extractableAmonut = sumBalance(membersTokens);
-// } else {
-//   // For member tokens: Determine the maximum redeemable amount of tokens from the group vault.
-//   // Then, sum all other tokens (including group tokens) that could be converted into ERC1155 group tokens,
-//   // and use the lesser of the two amounts.
-//   const maxRedeemableTokensAmount = await getMaxRedeemableAmount(tokenAvatar);
-//   const filteredBalances = balances.filter(
-//     (balance) => balance.tokenOwner !== tokenAvatar,
-//   );
-//   const convertableTokensOnBalance = sumBalance(filteredBalances);
-
-//   extractableAmonut =
-//     maxRedeemableTokensAmount > convertableTokensOnBalance
-//       ? convertableTokensOnBalance
-//       : maxRedeemableTokensAmount;
-// }
-
-// // The total theoretically available amount is the sum of the ERC20 balance,
-// // the ERC1155 balance, and the mintable/redeemable amount from the group.
-// return erc20TokenBalance + erc1155TokenBalance + extractableAmonut;
-// }
 
 /**
  * @notice Updates a specific group member's cache data, including token address and latest price.
@@ -974,154 +771,6 @@ async function pickDeal(member: GroupMember): Promise<Deal> {
 }
 
 /**
- * @notice Sums up token balances from an array of TokenBalanceRow objects.
- * @param balances An array of TokenBalanceRow objects.
- * @param isStatic If true, sums up the static balance, otherwise the dynamic balance.
- * @return {bigint} The total summed token balance.
- */
-function sumBalance(
-  balances: TokenBalanceRow[],
-  isStatic: boolean = true,
-): bigint {
-  return balances.reduce((sum, entry) => {
-    return isStatic
-      ? sum + BigInt(entry.staticAttoCircles)
-      : sum + BigInt(entry.attoCircles);
-  }, BigInt(0));
-}
-
-/**
- * @notice Selects enough token balances from an array until the accumulated amount reaches or exceeds the tokens needed.
- * @param balances An array of TokenBalanceRow objects.
- * @param tokensNeeded The required total token amount.
- * @return {TokenBalanceRow[]} An array of TokenBalanceRow objects that together meet or exceed the tokensNeeded.
- */
-function gatherTokens(
-  balances: TokenBalanceRow[],
-  tokensNeeded: bigint,
-): TokenBalanceRow[] {
-  let accumulatedAmount = BigInt(0);
-  const selected: TokenBalanceRow[] = [];
-  for (const b of balances) {
-    // Stop if we've met or exceeded the requirement
-    if (accumulatedAmount >= tokensNeeded) break;
-    accumulatedAmount += BigInt(b.staticAttoCircles);
-    selected.push(b);
-  }
-  return selected;
-}
-
-/**
- * @notice Unwraps a list of token balances by invoking the appropriate unwrapping function on the bot's avatar.
- * @param tokenList An array of TokenBalanceRow objects to unwrap.
- * @return {Promise<void>}
- */
-async function unwrapTokenList(tokenList: TokenBalanceRow[]) {
-  console.log("Tokens unwrapping");
-  const unwrappingQueue = tokenList.map(async (token) => {
-    if (token.isInflationary && token.isErc20) {
-      await arbBot.avatar.unwrapInflationErc20(
-        token.tokenAddress,
-        token.staticAttoCircles,
-      );
-    } else if (token.isErc20) {
-      await arbBot.avatar.unwrapDemurrageErc20(
-        token.tokenAddress,
-        token.staticAttoCircles,
-      );
-    }
-  });
-  await Promise.all(unwrappingQueue);
-}
-
-/**
- * @notice Mints group tokens from members' balances if sufficient tokens exist.
- * @param tokensToMint The required number of tokens to mint.
- * @param balances An array of TokenBalanceRow objects representing available member balances.
- * @return {Promise<boolean>} A promise that resolves to true if minting is successful, false otherwise.
- */
-async function mintIfPossibleFromMembers(
-  tokensToMint: bigint,
-  balances: TokenBalanceRow[],
-): Promise<boolean> {
-  // 1. Sum up members' tokens (exclude group address balances)
-  const membersTokens = balances.filter(
-    (balance) => balance.tokenOwner !== arbBot.groupAddress,
-  );
-  const additionalMintableGroupTokens = sumBalance(membersTokens);
-
-  // 2. Check if there's enough
-  if (additionalMintableGroupTokens < tokensToMint) {
-    return false;
-  }
-
-  // 3. Gather enough from members
-  const utilizableBalances = gatherTokens(membersTokens, tokensToMint);
-
-  // 4. Unwrap them
-  await unwrapTokenList(utilizableBalances);
-
-  // 5. Mint from those unwrapped tokens
-  console.log("Group tokens mint started");
-  await mintGroupTokensFromIndividualTokens(utilizableBalances);
-
-  return true;
-}
-
-/**
- * @notice Mints group tokens from others' balances, then redeems to obtain inflationary tokens.
- * @param tokensToMint The required token amount to mint.
- * @param balances An array of TokenBalanceRow objects representing available balances.
- * @param avatar The avatar address used in the redemption process.
- * @param tokenAddress The token address for conversion.
- * @return {Promise<boolean>} A promise that resolves to true if the full mint & redeem flow succeeds, false otherwise.
- */
-async function mintIfPossibleFromOthers(
-  tokensToMint: bigint,
-  balances: TokenBalanceRow[],
-  avatar: string,
-  tokenAddress: string,
-): Promise<boolean> {
-  const maxRedeemableTokensAmount = await getMaxRedeemableAmount(avatar);
-  const filteredBalances = balances.filter(
-    (balance) => balance.tokenOwner !== avatar,
-  );
-  const additionalMintableTokens = sumBalance(filteredBalances);
-
-  // Check if we have enough to redeem
-  if (
-    additionalMintableTokens < tokensToMint ||
-    maxRedeemableTokensAmount < tokensToMint
-  ) {
-    return false;
-  }
-
-  // Gather enough tokens
-  const utilizableBalances = gatherTokens(filteredBalances, tokensToMint);
-
-  // Unwrap them
-  await unwrapTokenList(utilizableBalances);
-
-  // Some flows exclude group-owned tokens before mint:
-  const filteredGroupTokens = utilizableBalances.filter(
-    (token) => token.tokenOwner !== arbBot.groupAddress,
-  );
-
-  console.log("Group tokens mint");
-  await mintGroupTokensFromIndividualTokens(filteredGroupTokens);
-
-  console.log("Group tokens redeem");
-  const demurrageValue = await convertInflationaryToDemurrage(
-    tokenAddress,
-    tokensToMint,
-  );
-
-  await redeemGroupTokensWithHubForBaseEncoding([avatar], [demurrageValue]);
-
-  return true;
-}
-
-/**
  * @notice Ensures that the bot has the required amount of tokens for a swap operation.
  *         If the current balance is insufficient, attempts to mint or redeem additional tokens.
  * @param tokenAddress The address of the token required.
@@ -1261,115 +910,6 @@ async function requireTokens(
     console.error("Wrapping failed:", error);
     return false;
   }
-
-  // // to avoid porecision errors and mismatch problems, we truncate the balance to the 6 decimals. THis is inconsistent in general
-  // // since I did not do that when the theoretically available Amount was fetched.
-  // erc1155TokenBalance =
-  //   (BigInt(erc1155TokenBalance) / BigInt(1e11)) * BigInt(1e11);
-
-  // const transferRequired = missingAmountDemurragedUnits > BigInt(0);
-
-  // if (transferRequired) {
-  //   try {
-  //     let transferReceipt;
-
-  //     if (tokenAddress === arbBot.groupTokenAddress) {
-  //       console.log("Attempting transfer to minthandler");
-  //       transferReceipt = await arbBot.avatar.transfer(
-  //         mintHandlerAddress,
-  //         missingAmountDemurragedUnits,
-  //         undefined,
-  //         undefined,
-  //         true,
-  //         undefined,
-  //         undefined,
-  //       );
-  //     } else {
-  //       console.log("Attempting transfer to self");
-  //       transferReceipt = await arbBot.avatar.transfer(
-  //         arbBot.address,
-  //         missingAmountDemurragedUnits,
-  //         undefined,
-  //         undefined,
-  //         true,
-  //         undefined,
-  //         [tokenAvatar],
-  //       );
-  //     }
-
-  //     if (!transferReceipt || transferReceipt.status === 0) {
-  //       console.error("Transfer failed");
-  //       return false;
-  //     }
-  //   } catch (error) {
-  //     console.error("Transfer failed:", error);
-  //     return false;
-  //   }
-  // }
-
-  // Only proceed with wrapping if transfer was successful or not required
-
-  // since some of the existing erc20 tokens might have become unwrapped by the pathfinder during the above transfer,
-  // we now need to wrap the whole required amount (as stated in the demurragedUnits), which should result in the required Static Amount.
-  // try {
-  //   console.log("Wrapping tokens");
-  //   const wrapReceipt = await arbBot.avatar.wrapInflationErc20(
-  //     tokenAvatar,
-  //     tokenAmountDemurragedUnits,
-  //   );
-
-  //   if (!wrapReceipt || wrapReceipt.status === 0) {
-  //     console.error("Wrapping failed");
-  //     return false;
-  //   }
-
-  //   return true;
-  // } catch (error) {
-  //   console.error("Wrapping failed:", error);
-  //   return false;
-  // }
-
-  // // @todo replace with the balances array check
-  // // Get the current token balance for the bot.
-  // const initialTokenBalance = await getBotErc20Balance(tokenAddress);
-  // if (initialTokenBalance >= tokenAmount) {
-  //   return true;
-  // }
-
-  // const staticBalance = balances.filter(
-  //   (balance) =>
-  //     tokenAvatar.toLowerCase() === balance.tokenOwner &&
-  //     balance.isErc1155 === true,
-  // );
-  // let tokensToWrapBalance = BigInt(0);
-  // if (staticBalance.length) {
-  //   tokensToWrapBalance = BigInt(staticBalance[0].staticAttoCircles);
-  // }
-
-  // // If the available wrappable tokens are insufficient, attempt to mint additional tokens.
-  // if (tokensToWrapBalance < lackingAmount) {
-  //   const tokensToMint = lackingAmount - tokensToWrapBalance;
-
-  //   let mintSucceeded = false;
-  //   if (tokenAddress.toLocaleLowerCase() === arbBot.groupTokenAddress) {
-  //     // Mint tokens from members excluding the group address.
-  //     // @todo update naming
-  //     mintSucceeded = await mintIfPossibleFromMembers(tokensToMint, balances);
-  //   } else {
-  //     // Use the mint + redeem flow for other tokens.
-  //     mintSucceeded = await mintIfPossibleFromOthers(
-  //       tokensToMint,
-  //       balances,
-  //       tokenAvatar,
-  //       tokenAddress,
-  //     );
-  //   }
-  //   if (!mintSucceeded) {
-  //     return false;
-  //   }
-  // }
-
-  return true;
 }
 /**
  * @notice Converts an inflationary token amount to its corresponding demurrage-adjusted value.
@@ -1427,45 +967,6 @@ async function convertDemurrageToInflationary(
 }
 
 /**
- * @notice Sorts an array of token balances, prioritizing group-owned ERC1155 and inflationary tokens,
- *         and then sorting the rest in descending order by the static token balance.
- * @param balances An array of TokenBalanceRow objects.
- * @return {TokenBalanceRow[]} The sorted array of TokenBalanceRow objects.
- */
-function sortBalances(balances: TokenBalanceRow[]): TokenBalanceRow[] {
-  return balances.sort((a, b) => {
-    // Check if the tokenOwner is a groupAddress and isErc1155
-    const aIsErc1155 = a.tokenOwner === arbBot.groupAddress && a.isErc1155;
-    const bIsErc1155 = b.tokenOwner === arbBot.groupAddress && b.isErc1155;
-
-    // Check if the tokenOwner is a groupAddress and isInflationary
-    const aIsInflationary =
-      a.tokenOwner === arbBot.groupAddress && a.isInflationary;
-    const bIsInflationary =
-      b.tokenOwner === arbBot.groupAddress && b.isInflationary;
-
-    // Prioritize items with tokenOwner equal to groupAddress and isErc1155
-    if (aIsErc1155 && !bIsErc1155) return -1;
-    if (!aIsErc1155 && bIsErc1155) return 1;
-
-    // Prioritize items with tokenOwner equal to groupAddress and isInflationary
-    if (aIsInflationary && !bIsInflationary) return -1;
-    if (!aIsInflationary && bIsInflationary) return 1;
-
-    // Sort the rest in DESC order by staticAttoCircles
-    const result = BigInt(b.staticAttoCircles) - BigInt(a.staticAttoCircles);
-
-    if (result > BigInt(0)) {
-      return 1;
-    } else if (result < BigInt(0)) {
-      return -1;
-    } else {
-      return 0;
-    }
-  });
-}
-
-/**
  * @notice Approves a specified token for spending by a designated operator.
  * @param tokenAddress The ERC20 token address.
  * @param operatorAddress The address to be approved.
@@ -1508,32 +1009,6 @@ async function execDeal(deal: Deal): Promise<boolean> {
     return await swapUsingBalancer(deal.swapData);
   }
   return false;
-}
-
-/**
- * @notice Retrieves the bot's token balances filtered by group membership and sorts them.
- * @param members An array of group members.
- * @return {Promise<TokenBalanceRow[]>} A promise that resolves to an array of filtered and sorted TokenBalanceRow objects.
- */
-async function getBotBalances(
-  members: GroupMember[] = [],
-): Promise<TokenBalanceRow[]> {
-  let botBalances: TokenBalanceRow[] = await circlesData.getTokenBalances(
-    arbBot.address,
-  );
-
-  let memberAddresses = new Set(
-    members.map((member) => member.address.toLowerCase()),
-  );
-  if (arbBot.groupAddress) memberAddresses.add(arbBot.groupAddress);
-
-  const filteredBalances = botBalances.filter(
-    (token) =>
-      memberAddresses.has(token.tokenOwner.toLowerCase()) &&
-      token.version === 2,
-  );
-
-  return sortBalances(filteredBalances);
 }
 
 /**

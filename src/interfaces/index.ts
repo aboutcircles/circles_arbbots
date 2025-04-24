@@ -5,8 +5,6 @@ import { Avatar } from "@circles-sdk/sdk";
 export interface Bot {
   avatar?: Avatar;
   groupTokenAddress?: string;
-  redeemOperatorContract?: Contract;
-  baseRedemptionEncoderContract?: Contract;
   bouncerOrgContract?: Contract;
   groupAddress: string;
   groupMembersCache: MembersCache;
