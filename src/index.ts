@@ -578,7 +578,6 @@ async function theoreticallyAvailableAmountCRC(
     await updateBouncerOrgTrust(tokenAvatar!);
   }
 
-  console.log("toAddress:", toAddress);
   const maxTransferable = await arbBot.avatar.getMaxTransferableAmount(
     toAddress,
     undefined,
