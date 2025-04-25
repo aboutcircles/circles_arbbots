@@ -41,6 +41,7 @@ import {
   SwapBuildCallInput,
   ExactInQueryOutput,
   ExactOutQueryOutput,
+  max,
 } from "@balancer/sdk";
 
 import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
@@ -66,7 +67,6 @@ const crcBouncerOrgAddress = "0x98B1e32Af39C1d3a33A9a2b7fe167b1b4a190872";
  */
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 const wallet = new Wallet(botPrivateKey, provider);
-const contractRunner = new PrivateKeyContractRunner(provider, botPrivateKey);
 
 /**
  * @notice Balancer API instance used to fetch swap paths and quotes.
@@ -219,7 +219,7 @@ export class DataInterface {
     }
   }
 
-  public async getMaxHolder(avatarAddress: string): Promise<Avatar | null> {
+  public async getMaxHolder(avatarAddress: string): Promise<Address | null> {
     try {
       const query = `
         SELECT "account", "demurragedTotalBalance"
@@ -234,7 +234,7 @@ export class DataInterface {
       ]);
 
       if (result.rows.length > 0) {
-        return await this.sdk!.getAvatar(result.rows[0].account);
+        return result.rows[0].account;
       }
 
       return null;
@@ -255,25 +255,51 @@ export class DataInterface {
         return 0n;
       }
 
-      const maxTransferableAmount = maxHolder.maxTransferableAmount;
+      const findPathPayload = {
+        jsonrpc: "2.0",
+        id: 0,
+        method: "circlesV2_findPath",
+        params: [
+          {
+            Source: maxHolder,
+            Sink: target.isGroup ? target.mintHandler! : target.avatar, // we're using the fact that all hunman account trust themselves (and cannot do otherwise)
+            FromTokens: [source.avatar],
+            ToTokens: target.isGroup ? undefined : [target.avatar],
+            WithWrapped: true,
+            TargetFlow: "99999999999999999999999999999999999",
+          },
+        ],
+      };
+
+      const response = await fetch("https://rpc.aboutcircles.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(findPathPayload),
+      });
+
+      const data = await response.json();
+
+      const maxTransferableAmount = data.result.maxFlow;
 
       // Handle the float conversion properly
-      const amountWith18Decimals = maxTransferableAmount * Math.pow(10, 18);
-      const roundedAmount = Math.round(amountWith18Decimals);
+      // const amountWith18Decimals = maxTransferableAmount * Math.pow(10, 18);
+      // const roundedAmount = Math.round(amountWith18Decimals);
 
-      // Add safety check
-      if (!Number.isFinite(roundedAmount)) {
-        console.warn(
-          `Invalid amount after conversion: ${maxTransferableAmount}`,
-        );
-        return 0n;
-      }
+      // // Add safety check
+      // if (!Number.isFinite(roundedAmount)) {
+      //   console.warn(
+      //     `Invalid amount after conversion: ${maxTransferableAmount}`,
+      //   );
+      //   return 0n;
+      // }
 
       // Convert to BigInt via string to avoid scientific notation issues
-      const demurragedAmount = BigInt(roundedAmount.toString());
+      const demurragedAmount = BigInt(maxTransferableAmount);
 
       // Convert demurraged to inflationary
-      return this.convertDemurrageToInflationary(
+      return await this.convertDemurrageToInflationary(
         target.erc20tokenAddress,
         demurragedAmount,
       );
@@ -467,6 +493,24 @@ export class DataInterface {
       return null;
     }
     return tokenAddress.toLowerCase();
+  }
+
+  /**
+   * @notice Retrieves the bot's ERC20 token balance.
+   * @param tokenAddress The address of the ERC20 token.
+   * @return {Promise<bigint>} A promise that resolves to the token balance as a bigint.
+   */
+  public async getCollateralBalance(): Promise<bigint> {
+    // Create a contract instance for the token
+    const tokenContract = new Contract(
+      this.referenceToken.address,
+      erc20Abi,
+      provider,
+    );
+
+    // Fetch the balance
+    let balance = await tokenContract.balanceOf(wallet.address);
+    return balance;
   }
 
   /**

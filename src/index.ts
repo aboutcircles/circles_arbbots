@@ -14,8 +14,8 @@ const LOG_ACTIVITY = false;
 const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
 const EXPLORATION_RATE = 0.1;
 const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
-const PROFIT_THRESHOLD = QUERY_REFERENCE_AMOUNT;
-const GROUPS_CAP_LIQUIDITY = BigInt(500 * 1e18);
+const PROFIT_THRESHOLD = 0n; // profit threshold, should be denominated in the colalteral curreny
+// const GROUPS_CAP_LIQUIDITY = BigInt(500 * 1e18);
 const RESYNC_INTERVAL = 1000 * 60 * 15; // Resync every 15 minutes
 const DEFAULT_PRICE_REF_ADDRESS = "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b"; // METRI TEST SUPERGROUP
 const COLLATERAL_TOKEN =
@@ -266,6 +266,14 @@ class ArbitrageBot {
       edgeInfo.source,
       edgeInfo.target,
     );
+    console.log(
+      "Updated liquidity between:",
+      edgeInfo.source.avatar,
+      " and ",
+      edgeInfo.target.avatar,
+      ": ",
+      currentEdgeLiquidity,
+    );
 
     // Update the graph
     this.graph.updateEdgeAttributes(edgeKey, (attr) => {
@@ -349,7 +357,9 @@ class ArbitrageBot {
     target: CirclesNode,
     liquidity: bigint,
   ): Promise<Trade | null> {
-    let currentAmount = liquidity;
+    let currentAmount = MIN_BUYING_AMOUNT;
+
+    let collateralBalance = await this.dataInterface.getCollateralBalance();
 
     // Get initial quotes
     const initialBuyQuote = await this.dataInterface.fetchBalancerQuote({
@@ -364,7 +374,11 @@ class ArbitrageBot {
       amount: currentAmount,
     });
 
-    if (!initialBuyQuote || !initialSellQuote) {
+    if (
+      !initialBuyQuote ||
+      !initialSellQuote ||
+      initialBuyQuote.inputAmount.amount > collateralBalance
+    ) {
       return null;
     }
 
@@ -378,8 +392,8 @@ class ArbitrageBot {
     };
 
     // @todo: This needs to be improved as right now it simply reverts wheneever it doesn't get a good quote (e.g. because of missing liquidity in the pools...)
-    while (currentAmount > 2n * MIN_BUYING_AMOUNT) {
-      currentAmount /= 2n;
+    while (currentAmount < liquidity / 2n) {
+      currentAmount *= 2n;
 
       // Get quotes for reduced amount
       const buyQuote = await this.dataInterface.fetchBalancerQuote({
@@ -401,8 +415,11 @@ class ArbitrageBot {
       const currentProfit =
         sellQuote.outputAmount.amount - buyQuote.inputAmount.amount;
 
-      // If profit decreased, return the previous (best) trade
-      if (currentProfit < bestTrade.profit) {
+      // If profit decreased or the new quote exceeds the bot's balance in collateral, return the previous (best) trade
+      if (
+        currentProfit < bestTrade.profit ||
+        buyQuote.inputAmount.amount > collateralBalance
+      ) {
         return bestTrade;
       }
 
