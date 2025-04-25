@@ -1,12 +1,12 @@
 import { Client } from "pg";
-import { Matrix, sparse } from "mathjs";
 
 import {
   BalanceRow,
+  BaseGroupRow,
   CirclesNode,
   Direction,
   FetchBalancerQuoteParams,
-  Trade,
+  LatestPriceRow,
   TrustRelationRow,
 } from "./interfaces/index.js";
 
@@ -15,16 +15,12 @@ import { ethers, Contract, Wallet } from "ethers";
 
 // ABI
 import {
-  groupRedeemAbi,
-  groupTreasuryAbi,
   erc20Abi,
   hubV2Abi,
   erc20LiftAbi,
-  groupContractAbi,
   inflationaryTokenAbi,
-  baseRedemptionEncoderAbi,
   bouncerOrgAbi,
-} from "../abi/index.js";
+} from "./abi/index.js";
 
 import {
   BalancerApi,
@@ -41,7 +37,7 @@ import {
 } from "@balancer/sdk";
 
 import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
-import { CirclesData, CirclesRpc, TokenBalanceRow } from "@circles-sdk/data";
+import { CirclesData, CirclesRpc } from "@circles-sdk/data";
 import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
 import { baseGroupAbi } from "./abi/index.js";
 
@@ -54,8 +50,6 @@ const botPrivateKey = process.env.PRIVATE_KEY!;
 // Constant addresses
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
-const baseRedemptionEncoderAddress =
-  "0x59f6e1B5E6F1448ffBEB99cd164304014fb78A31";
 const crcBouncerOrgAddress = "0x98B1e32Af39C1d3a33A9a2b7fe167b1b4a190872";
 
 /**
@@ -80,8 +74,6 @@ const balancerApi = new BalancerApi("https://api-v3.balancer.fi/", chainId);
  * @dev hubV2Contract is the Circles hub contract instance.
  */
 const selectedCirclesConfig = circlesConfig[chainId];
-const circlesRPC = new CirclesRpc(selectedCirclesConfig.circlesRpcUrl);
-const circlesData = new CirclesData(circlesRPC);
 const hubV2Contract = new Contract(
   selectedCirclesConfig.v2HubAddress,
   hubV2Abi,
@@ -140,41 +132,6 @@ export class DataInterface {
     await this.client.end();
   }
 
-  // private async getTrustGraphEstimator(): Promise<SparseMatrix> {
-  //   try {
-  //     const trustQuery = `
-  //       SELECT
-  //         "truster",
-  //         "trustee"
-  //       FROM "V_CrcV2_TrustRelations"
-  //     `;
-
-  //     const trustResult = await this.client.query(trustQuery);
-
-  //     // Create indices for avatars
-  //     const avatars = new Set<string>();
-  //     trustResult.rows.forEach(row => {
-  //       avatars.add(row.truster);
-  //       avatars.add(row.trustee);
-  //     });
-
-  //     const avatarArray = Array.from(avatars);
-  //     this.avatarToIndex = new Map(avatarArray.map((avatar, i) => [avatar, i]));
-  //     const matrixSize = avatars.size;
-
-  //     const entries = trustResult.rows.map(row => ({
-  //       i: this.avatarToIndex.get(row.truster)!,
-  //       j: this.avatarToIndex.get(row.trustee)!,
-  //       value: 1
-  //     }));
-
-  //     return sparse(entries, [matrixSize, matrixSize]);
-  //   } catch (error) {
-  //     console.error('Error fetching trust graph:', error);
-  //     throw error;
-  //   }
-  // }
-
   public async getBalances(tokens: string[]): Promise<BalanceRow[]> {
     try {
       const query = `
@@ -197,20 +154,36 @@ export class DataInterface {
       return [];
     }
   }
-
   public async getTrustRelations(
-    trustees: string[],
+    params: {
+      trusters?: string[];
+      trustees?: string[];
+    } = {},
   ): Promise<TrustRelationRow[]> {
     try {
-      const query = `
-              SELECT
-                  "truster",
-                  "trustee"
+      let query = `
+              SELECT "truster", "trustee"
               FROM "V_CrcV2_TrustRelations"
-              WHERE "trustee" = ANY($1)
           `;
 
-      const result = await this.client.query(query, [trustees]);
+      const conditions: string[] = [];
+      const queryParams: string[] = [];
+
+      if (params.trusters?.length) {
+        queryParams.push(JSON.stringify(params.trusters));
+        conditions.push(`"truster" = ANY($${queryParams.length}::text[])`);
+      }
+
+      if (params.trustees?.length) {
+        queryParams.push(JSON.stringify(params.trustees));
+        conditions.push(`"trustee" = ANY($${queryParams.length}::text[])`);
+      }
+
+      if (conditions.length > 0) {
+        query += ` WHERE ${conditions.join(" AND ")}`;
+      }
+
+      const result = await this.client.query(query, queryParams);
       return result.rows.map((row) => ({
         truster: row.truster,
         trustee: row.trustee,
@@ -344,7 +317,7 @@ export class DataInterface {
     }
   }
 
-  private async getCurrentBackers(): Promise<String[]> {
+  private async getCurrentBackers(): Promise<string[]> {
     try {
       const balanceQuery = `
         SELECT
@@ -354,40 +327,111 @@ export class DataInterface {
 
       const balanceResult = await this.client.query(balanceQuery);
       // Extract unique backer addresses from the query result
-      const backers = new Set<string>();
-      balanceResult.rows.forEach((row) => {
-        backers.add(row.backer);
-      });
-
-      return Array.from(backers);
+      return balanceResult.rows;
     } catch (error) {
       console.error("Error fetching backers:", error);
       return [];
     }
   }
 
+  private async getBaseGroups(): Promise<BaseGroupRow[]> {
+    try {
+      const query = `
+            SELECT
+              "group",
+              "mintHandler"
+            FROM "CrcV2_BaseGroupCreated"
+          `;
+
+      const result = await this.client.query(query);
+      return result.rows.map((row) => ({
+        address: row.group,
+        mintHandler: row.mintHandler,
+      }));
+    } catch (error) {
+      console.error("Error fetching base groups:", error);
+      return [];
+    }
+  }
+
   // @todo: We need to add groups to this!
-  public async getCRCWithLiquidity(): Promise<CirclesNode[]> {
-    const backerAddresses = await this.getCurrentBackers();
+  public async loadNodes(): Promise<CirclesNode[]> {
     const nodes: CirclesNode[] = [];
+
+    // we first get individual CRCs that are backers
+    const backerAddresses = await this.getCurrentBackers();
     for (const backerAddress of backerAddresses) {
-      const isGroup = await this.checkIsGroup(backerAddress as string);
-      const tokenAddress = await this.getERC20Token(backerAddress as string);
+      // const isGroup = await this.checkIsGroup(backerAddress as string);
+      const tokenAddress = await this.getERC20Token(backerAddress);
       const node: CirclesNode = {
-        avatar: backerAddress as string,
-        isGroup: isGroup,
+        avatar: backerAddress,
+        isGroup: false,
+        erc20tokenAddress: tokenAddress!, // we know the tokenAddress must exist, since backing requires wrapping.
+        lastUpdated: Date.now(),
+      };
+      nodes.push(node);
+    }
+
+    // we then simply load all basegroups with an ERC20 token (as I currently don't have a simple way to tell which ones have liquidity)
+    const baseGroups = await this.getBaseGroups();
+    for (const group of baseGroups) {
+      // const isGroup = await this.checkIsGroup(group as string);
+      const tokenAddress = await this.getERC20Token(group.address);
+      if (!tokenAddress) continue;
+      const node: CirclesNode = {
+        avatar: group.address,
+        isGroup: true,
         erc20tokenAddress: tokenAddress,
+        mintHandler: group.mintHandler,
         lastUpdated: Date.now(),
       };
       nodes.push(node);
     }
     return nodes;
   }
-  private async checkIsGroup(address: string): Promise<boolean> {
-    return await hubV2Contract.isGroup(address);
+
+  public async fetchLatestPrices(
+    tokenAddresses: string[],
+  ): Promise<Map<string, LatestPriceRow | null>> {
+    try {
+      // const query = `
+      //   SELECT
+      //     "tokenAddress",
+      //     "timestamp"
+      //     "priceInEth"
+      //   FROM "V_BPoolPrices"
+      //   WHERE "tokenAddress" = ANY($1)
+      // `;
+
+      // const result = await this.client.query(query, [tokenAddresses]);
+
+      const priceMap = new Map<string, LatestPriceRow | null>();
+
+      // Initialize all addresses with null
+      tokenAddresses.forEach((address) => {
+        priceMap.set(address, null);
+      });
+
+      // Update prices where found
+      // result.rows.forEach((row) => {
+      //   priceMap.set(row.tokenAddress, {
+      //     price: BigInt(row.priceInEth),
+      //     timestamp: Number(row.timestamp),
+      //   });
+      // });
+
+      return priceMap;
+    } catch (error) {
+      console.error("Error fetching latest prices:", error);
+      return new Map();
+    }
   }
 
-  private async getERC20Token(avatarAddress: string): Promise<string> {
+  // private async checkIsGroup(address: string): Promise<boolean> {
+  //   return await hubV2Contract.isGroup(address);
+  // }
+
+  public async getERC20Token(avatarAddress: string): Promise<string | null> {
     const tokenWrapperContract = new Contract(
       erc20LiftAddress,
       erc20LiftAbi,
@@ -397,6 +441,10 @@ export class DataInterface {
       DemurragedVSInflation,
       avatarAddress,
     );
+
+    if (tokenAddress === ethers.ZeroAddress) {
+      return null;
+    }
     return tokenAddress.toLowerCase();
   }
 

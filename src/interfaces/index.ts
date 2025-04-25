@@ -1,41 +1,69 @@
-import { Contract } from "ethers";
 import { Swap } from "@balancer/sdk";
-import { Avatar } from "@circles-sdk/sdk";
 
-export interface Bot {
-  avatar?: Avatar;
-  groupTokenAddress?: string;
-  bouncerOrgContract?: Contract;
-  groupAddress: string;
-  groupMembersCache: MembersCache;
-  address: string;
-  approvedTokens: string[];
-}
+// @todo: Make these 0xstrings.
+type Currency = string;
+type CirclesAvatar = string;
 
-export interface GroupMember {
-  address: string;
-  tokenAddress: string;
-  latestPrice?: bigint; // the price of the member token in units of the group token in human readonable format
-  lastPriceUpdate?: number; // the timestamp of the last price update
-}
-
-export interface MembersCache {
+export interface CirclesNode {
+  avatar: CirclesAvatar;
+  erc20tokenAddress: Currency;
+  // tokenId: string;
   lastUpdated: number;
-  members: GroupMember[];
+  isGroup: boolean;
+  mintHandler?: string;
+  price?: bigint;
 }
 
-export interface Deal {
-  isProfitable?: boolean;
-  swapData?: Swap | null;
+export interface CirclesEdge {
+  liquidity: bigint;
+  lastUpdated: number;
 }
 
-export enum ArbDirection {
-  BUY_MEMBER_TOKENS,
-  BUY_GROUP_TOKENS,
+export interface Trade {
+  buyQuote: Swap;
+  sellQuote: Swap;
+  amount: bigint;
+  profit: bigint;
 }
+
+export interface EdgeInfo {
+  edge: CirclesEdge;
+  source: CirclesNode;
+  target: CirclesNode;
+  edgeKey: string;
+  sourceKey: string;
+  targetKey: string;
+}
+
+export enum Direction {
+  BUY,
+  SELL,
+}
+
 export interface FetchBalancerQuoteParams {
   tokenAddress: string;
-  direction?: ArbDirection;
-  amountOut?: bigint;
+  direction?: Direction;
+  amount?: bigint;
   logQuote?: boolean;
+}
+
+export interface BalanceRow {
+  account: string;
+  demurragedTotalBalance: bigint; // or number, depending on how you want to handle the balance
+  tokenAddress: string;
+}
+
+export interface TrustRelationRow {
+  truster: string;
+  trustee: string;
+}
+
+export interface BaseGroupRow {
+  address: string;
+  mintHandler: string;
+}
+
+export interface LatestPriceRow {
+  price: bigint;
+  timestamp: number;
 }

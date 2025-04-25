@@ -104,6 +104,13 @@ export const hubV2Abi = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [{ name: "_group", type: "address" }],
+    name: "isGroup",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view",
+    type: "function",
+  },
 ];
 
 export const bouncerOrgAbi = [
@@ -265,5 +272,14 @@ export const baseRedemptionEncoderAbi = [
     ],
     payable: false,
     stateMutability: "pure",
+  },
+];
+export const baseGroupAbi = [
+  {
+    inputs: [],
+    name: "BASE_MINT_HANDLER",
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function",
   },
 ];
