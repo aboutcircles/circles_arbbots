@@ -6,6 +6,7 @@ import {
   Trade,
   EdgeInfo,
   Direction,
+  Address,
 } from "./interfaces/index.js";
 
 // global variables
@@ -16,7 +17,12 @@ const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
 const PROFIT_THRESHOLD = QUERY_REFERENCE_AMOUNT;
 const GROUPS_CAP_LIQUIDITY = BigInt(500 * 1e18);
 const RESYNC_INTERVAL = 1000 * 60 * 15; // Resync every 15 minutes
-const PRICE_REFERENCE_ADDRESS = "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b"; // METRI TEST SUPERGROUP
+const DEFAULT_PRICE_REF_ADDRESS = "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b"; // METRI TEST SUPERGROUP
+const COLLATERAL_TOKEN =
+  "0x6c76971f98945ae98dd7d4dfca8711ebea946ea6" as Address; // wstETH
+const COLLATERAL_TOKEN_DECIMALS = 18;
+const DEBUG = true; // Toggle detailed logging
+const NODE_LIMIT = 5;
 
 class ArbitrageBot {
   private graph: DirectedGraph;
@@ -29,82 +35,104 @@ class ArbitrageBot {
     this.dataInterface = new DataInterface(
       QUERY_REFERENCE_AMOUNT,
       LOG_ACTIVITY,
+      COLLATERAL_TOKEN,
+      COLLATERAL_TOKEN_DECIMALS,
     );
   }
 
-  private async initializeGraph(): Promise<void> {
-    // Get accounts with presumable liquidity (right now backers and basegroups with existing erc20 tokens)
-    let nodes = await this.dataInterface.loadNodes();
+  // Add an init method to ArbitrageBot
+  public async init(): Promise<void> {
+    await this.dataInterface.init();
+  }
 
+  private async initializeGraph(): Promise<void> {
+    console.log("Starting graph initialization...");
+    console.time("Graph initialization");
+
+    // Get accounts with presumable liquidity
+    console.log("Loading nodes...");
+    let nodes = await this.dataInterface.loadNodes(NODE_LIMIT);
+    console.log(`Loaded ${nodes.length} nodes`);
+
+    console.log("Estimating prices...");
     nodes = await this.estimatePrices(nodes);
+    console.log("Price estimation complete");
 
     // Add all nodes first
+    console.log("Adding nodes to graph...");
     for (let node of nodes) {
       this.graph.addNode(node.avatar, node);
     }
-    // Add the extended information for groups
-    // For every group in the liquid accounts
+    console.log(`Added ${nodes.length} nodes to graph`);
+
+    // Add edges
+    console.log("Starting edge creation...");
+    let edgeCount = 0;
+
     for (const targetNode of nodes) {
+      if (DEBUG)
+        console.log(
+          `Processing target node: ${targetNode.avatar.slice(0, 8)}...`,
+        );
+
       let balances;
       if (targetNode.isGroup) {
-        // Get the group members
+        if (DEBUG)
+          console.log(
+            `Fetching group members for ${targetNode.avatar.slice(0, 8)}...`,
+          );
         const groupMembers = await this.dataInterface.getTrustRelations({
           trusters: [targetNode.avatar],
         });
-
-        // Get the accounts that hold member tokens (since these could be turned into group tokens).
         balances = await this.dataInterface.getBalances(
           groupMembers.map((member) => member.trustee),
         );
       } else {
-        // get the accounts that hold the target token
         balances = await this.dataInterface.getBalances([targetNode.avatar]);
       }
 
       for (const sourceNode of nodes) {
         if (sourceNode == targetNode) continue;
 
+        if (DEBUG)
+          console.log(
+            `Processing source node: ${sourceNode.avatar.slice(0, 8)}...`,
+          );
+
         let trustRelations;
         if (sourceNode.isGroup) {
-          // Get the group members
           const groupMembers = await this.dataInterface.getTrustRelations({
             trusters: [sourceNode.avatar],
           });
-
-          // TODO: This is systematically overestimating the redeemable amounts, since it assumes any amounts of
-          // user collateral can be redeemed. To avoid this, might think about capping liquidity from groups by the total supply.
-          // get the users that accept tokens created by group members (since )
           trustRelations = await this.dataInterface.getTrustRelations({
             trustees: groupMembers.map((member) => member.trustee),
           });
         } else {
-          // get the users that accept the sourceToken
           trustRelations = await this.dataInterface.getTrustRelations({
             trustees: [sourceNode.avatar],
           });
         }
 
-        // we now iterate over the trustRelations
-        // and the balances and add edges accordingly
+        // Edge creation
         for (const balance of balances) {
           for (const trustRelation of trustRelations) {
-            // the balances are by construction of the targetToken (or memberTokens)
-            // while the trustRelations are by construction with sourceTOkens (or memberTokens) as trustees
-            // liqiduity between tokens is created from users holding the target token and trusting the source token
             if (balance.account == trustRelation.truster) {
               const sourceKey = sourceNode.avatar;
               const targetKey = targetNode.avatar;
-              // add edge if necessary
+
               let edge = this.graph.edge(sourceKey, targetKey);
               if (!edge) {
                 edge = this.graph.addEdge(sourceKey, targetKey, {
                   liquidity: BigInt(0),
                   lastUpdated: Date.now(),
                 });
+                edgeCount++;
+
+                if (edgeCount % 100 === 0) {
+                  console.log(`Created ${edgeCount} edges so far...`);
+                }
               }
 
-              // Add the balance to the edges (we don't update the lastUpdated,
-              // since initialistion is considered a single moment in time
               this.graph.updateEdgeAttribute(
                 edge,
                 "liquidity",
@@ -115,6 +143,19 @@ class ArbitrageBot {
         }
       }
     }
+
+    console.log(
+      `Graph initialization complete. Created ${edgeCount} edges total`,
+    );
+    console.timeEnd("Graph initialization");
+
+    // Log graph statistics
+    console.log("\nGraph Statistics:");
+    console.log(`Nodes: ${this.graph.order}`);
+    console.log(`Edges: ${this.graph.size}`);
+    console.log(
+      `Density: ${(this.graph.size / (this.graph.order * (this.graph.order - 1))).toFixed(4)}`,
+    );
   }
 
   private scoreEdge(edgeKey: string): bigint {
@@ -176,21 +217,31 @@ class ArbitrageBot {
   }
 
   private async executeArbitrageRound(): Promise<void> {
+    console.log("\nStarting new arbitrage round...");
     const edgeKey = this.selectNextEdge();
 
-    // Query actual data and update them in the graph
+    console.log("Winnign edge score:", this.scoreEdge(edgeKey));
+
+    console.log("Updating values for selected edge: ", edgeKey);
     const updatedEdgeInfo = await this.updateValues(edgeKey);
 
-    // calculate optimal trade
+    console.log("Calculating optimal trade...");
     const optimalTrade = await this.calculateOptimalTrade(
       updatedEdgeInfo.source,
       updatedEdgeInfo.target,
       updatedEdgeInfo.edge.liquidity,
     );
 
-    // we only want to perform trades abive a certain profit treshold
-    if (optimalTrade && optimalTrade.profit > PROFIT_THRESHOLD) {
-      await this.executeTrade(optimalTrade);
+    if (optimalTrade) {
+      console.log(`Found trade with profit: ${optimalTrade.profit.toString()}`);
+      if (optimalTrade.profit > PROFIT_THRESHOLD) {
+        console.log("Trade exceeds profit threshold, executing...");
+        await this.executeTrade(optimalTrade);
+      } else {
+        console.log("Trade below profit threshold, skipping execution");
+      }
+    } else {
+      console.log("No viable trade found");
     }
   }
 
@@ -198,7 +249,19 @@ class ArbitrageBot {
     const edgeInfo = this.getEdgeInfo(edgeKey);
 
     const currentSourcePrice = await this.getCurrentPrice(edgeInfo.source);
+    console.log(
+      "Updated price for ",
+      edgeInfo.source.avatar,
+      ": ",
+      currentSourcePrice,
+    );
     const currentTargetPrice = await this.getCurrentPrice(edgeInfo.target);
+    console.log(
+      "Updated price for ",
+      edgeInfo.target.avatar,
+      ": ",
+      currentTargetPrice,
+    );
     const currentEdgeLiquidity = await this.getCurrentLiquidity(
       edgeInfo.source,
       edgeInfo.target,
@@ -235,10 +298,10 @@ class ArbitrageBot {
   private async estimatePrices(nodes: CirclesNode[]): Promise<CirclesNode[]> {
     // create a reference price for nodes whose price haven't been logged
     const referenceToken = await this.dataInterface.getERC20Token(
-      PRICE_REFERENCE_ADDRESS,
+      DEFAULT_PRICE_REF_ADDRESS,
     );
     const referencePrice = (await this.dataInterface.fetchBalancerQuote({
-      tokenAddress: referenceToken!,
+      tokenAddress: referenceToken! as Address,
     }))!.inputAmount.amount;
 
     const latestPrices = await this.dataInterface.fetchLatestPrices(
@@ -400,6 +463,13 @@ class ArbitrageBot {
   }
 }
 
-// Usage
-const bot = new ArbitrageBot(0.1);
-bot.run().catch(console.error);
+async function main() {
+  const bot = new ArbitrageBot(0.1);
+  await bot.init();
+  await bot.run().catch(console.error);
+}
+
+main().catch((error) => {
+  console.error("Failed to start bot:", error);
+  process.exit(1);
+});

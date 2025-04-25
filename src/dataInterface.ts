@@ -1,4 +1,10 @@
-import { Client } from "pg";
+import pg from "pg";
+const { Client } = pg;
+import WebSocket from "ws";
+
+if (!global.WebSocket) {
+  (global as any).WebSocket = WebSocket;
+}
 
 import {
   BalanceRow,
@@ -8,6 +14,7 @@ import {
   FetchBalancerQuoteParams,
   LatestPriceRow,
   TrustRelationRow,
+  Address,
 } from "./interfaces/index.js";
 
 // Import ethers v6
@@ -60,7 +67,6 @@ const crcBouncerOrgAddress = "0x98B1e32Af39C1d3a33A9a2b7fe167b1b4a190872";
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 const wallet = new Wallet(botPrivateKey, provider);
 const contractRunner = new PrivateKeyContractRunner(provider, botPrivateKey);
-await contractRunner.init();
 
 /**
  * @notice Balancer API instance used to fetch swap paths and quotes.
@@ -75,7 +81,7 @@ const balancerApi = new BalancerApi("https://api-v3.balancer.fi/", chainId);
  */
 const selectedCirclesConfig = circlesConfig[chainId];
 const hubV2Contract = new Contract(
-  selectedCirclesConfig.v2HubAddress,
+  selectedCirclesConfig.v2HubAddress as string,
   hubV2Abi,
   wallet,
 );
@@ -87,14 +93,19 @@ const bouncerOrgContract = new Contract(
 );
 
 export class DataInterface {
-  private client: Client;
+  private client: pg.Client;
   public quoteReferenceAmount: bigint;
   public referenceToken: Token;
   public logActivity: boolean;
-  public sdk: Sdk;
+  public sdk?: Sdk;
 
-  constructor(quoteReferenceAmount: bigint, logActivity: boolean = false) {
-    this.client = new Client({
+  constructor(
+    quoteReferenceAmount: bigint,
+    logActivity: boolean = false,
+    collateralToken: Address,
+    collateralTokenDecimals: number,
+  ) {
+    this.client = new pg.Client({
       host: "144.76.163.174",
       port: 5432,
       database: "circles",
@@ -104,20 +115,28 @@ export class DataInterface {
     this.quoteReferenceAmount = quoteReferenceAmount;
     this.referenceToken = new Token(
       chainId,
-      process.env.REFERENCE_TOKEN as `0x${string}`,
-      Number(process.env.REFERENCE_TOKEN_DECIMALS),
+      collateralToken,
+      Number(collateralTokenDecimals),
       "Reference Token",
     );
     this.logActivity = logActivity;
+  }
+
+  async init(): Promise<void> {
+    // Initialize contract runner
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    // const wallet = new Wallet(botPrivateKey, this.provider);
 
     const contractRunner = new PrivateKeyContractRunner(
       provider,
       botPrivateKey,
     );
-    this.sdk = new Sdk(contractRunner, selectedCirclesConfig);
-  }
+    await contractRunner.init();
 
-  async initialize(): Promise<void> {
+    // Initialize SDK
+    this.sdk = new Sdk(contractRunner, selectedCirclesConfig);
+
+    // Connect to database
     await this.client
       .connect()
       .then(() => {
@@ -127,7 +146,6 @@ export class DataInterface {
         console.error("Error connecting to PostgreSQL database", err);
       });
   }
-
   async cleanup(): Promise<void> {
     await this.client.end();
   }
@@ -143,7 +161,9 @@ export class DataInterface {
               WHERE "tokenAddress" = ANY($1)
           `;
 
-      const result = await this.client.query(query, [tokens]);
+      const result = await this.client.query(query, [
+        tokens.map((address) => address.toLowerCase()),
+      ]);
       return result.rows.map((row) => ({
         account: row.account,
         demurragedTotalBalance: BigInt(row.demurragedTotalBalance), // Convert to BigInt if needed
@@ -154,6 +174,7 @@ export class DataInterface {
       return [];
     }
   }
+
   public async getTrustRelations(
     params: {
       trusters?: string[];
@@ -162,21 +183,25 @@ export class DataInterface {
   ): Promise<TrustRelationRow[]> {
     try {
       let query = `
-              SELECT "truster", "trustee"
-              FROM "V_CrcV2_TrustRelations"
-          `;
+                SELECT "truster", "trustee"
+                FROM "V_CrcV2_TrustRelations"
+            `;
 
       const conditions: string[] = [];
       const queryParams: string[] = [];
 
       if (params.trusters?.length) {
-        queryParams.push(JSON.stringify(params.trusters));
-        conditions.push(`"truster" = ANY($${queryParams.length}::text[])`);
+        let trusters = params.trusters.map((truster) => truster.toLowerCase());
+        // Use ARRAY constructor instead of JSON.stringify
+        queryParams.push(`{${trusters.join(",")}}`);
+        conditions.push(`"truster" = ANY($${queryParams.length})`);
       }
 
       if (params.trustees?.length) {
-        queryParams.push(JSON.stringify(params.trustees));
-        conditions.push(`"trustee" = ANY($${queryParams.length}::text[])`);
+        let trustees = params.trustees.map((trustee) => trustee.toLowerCase());
+        // Use ARRAY constructor instead of JSON.stringify
+        queryParams.push(`{${trustees.join(",")}}`);
+        conditions.push(`"trustee" = ANY($${queryParams.length})`);
       }
 
       if (conditions.length > 0) {
@@ -197,17 +222,19 @@ export class DataInterface {
   public async getMaxHolder(avatarAddress: string): Promise<Avatar | null> {
     try {
       const query = `
-        SELECT account, "demurragedTotalBalance"
+        SELECT "account", "demurragedTotalBalance"
         FROM "V_CrcV2_BalancesByAccountAndToken"
         WHERE "tokenAddress" = $1
         ORDER BY "demurragedTotalBalance" DESC
         LIMIT 1
       `;
 
-      const result = await this.client.query(query, [avatarAddress]);
+      const result = await this.client.query(query, [
+        avatarAddress.toLowerCase(),
+      ]);
 
       if (result.rows.length > 0) {
-        return await this.sdk.api.avatar.getAvatar(result.rows[0].account);
+        return await this.sdk!.getAvatar(result.rows[0].account);
       }
 
       return null;
@@ -220,47 +247,40 @@ export class DataInterface {
   public async getSimulatedLiquidity(
     source: CirclesNode,
     target: CirclesNode,
-  ): Promise<bigint | null> {
-    const maxHolder = await this.getMaxHolder(source.avatar);
+  ): Promise<bigint> {
+    try {
+      const maxHolder = await this.getMaxHolder(source.avatar);
+      if (!maxHolder) {
+        console.log("No max holder found, returning 0");
+        return 0n;
+      }
 
-    if (!maxHolder) return null;
+      const maxTransferableAmount = maxHolder.maxTransferableAmount;
 
-    // if the targetToken is a group token, we need to find out the address of the mintHandler
-    // NB: for this, we're assuming the group is a basegroup
-    let toAddress;
-    let toTokens;
-    if (target.isGroup) {
-      const baseGroupContract = new Contract(
-        target.avatar,
-        baseGroupAbi,
-        provider,
+      // Handle the float conversion properly
+      const amountWith18Decimals = maxTransferableAmount * Math.pow(10, 18);
+      const roundedAmount = Math.round(amountWith18Decimals);
+
+      // Add safety check
+      if (!Number.isFinite(roundedAmount)) {
+        console.warn(
+          `Invalid amount after conversion: ${maxTransferableAmount}`,
+        );
+        return 0n;
+      }
+
+      // Convert to BigInt via string to avoid scientific notation issues
+      const demurragedAmount = BigInt(roundedAmount.toString());
+
+      // Convert demurraged to inflationary
+      return this.convertDemurrageToInflationary(
+        target.erc20tokenAddress,
+        demurragedAmount,
       );
-      toAddress = await baseGroupContract.BASE_MINT_HANDLER();
-    } else {
-      toAddress = crcBouncerOrgAddress;
-      await this.updateBouncerOrgTrust(target.avatar);
-      toTokens = [target.avatar];
+    } catch (error) {
+      console.error("Error in getSimulatedLiquidity:", error);
+      return 0n;
     }
-
-    let maxTransferableAmount = await maxHolder.getMaxTransferableAmount(
-      toAddress,
-      undefined,
-      true,
-      [source.avatar],
-      toTokens,
-    );
-
-    // reformating the amount
-    maxTransferableAmount = (maxTransferableAmount * 1e18).toFixed(0);
-    maxTransferableAmount = BigInt(maxTransferableAmount);
-
-    // Finally, get the amount in current static units
-    const inflationaryValue = await this.convertDemurrageToInflationary(
-      target.erc20tokenAddress,
-      maxTransferableAmount,
-    );
-
-    return inflationaryValue;
   }
 
   /**
@@ -321,13 +341,13 @@ export class DataInterface {
     try {
       const balanceQuery = `
         SELECT
-          "backer",
+          "backer"
         FROM "CrcV2_CirclesBackingCompleted"
       `;
 
       const balanceResult = await this.client.query(balanceQuery);
       // Extract unique backer addresses from the query result
-      return balanceResult.rows;
+      return balanceResult.rows.map((row) => row.backer);
     } catch (error) {
       console.error("Error fetching backers:", error);
       return [];
@@ -355,7 +375,7 @@ export class DataInterface {
   }
 
   // @todo: We need to add groups to this!
-  public async loadNodes(): Promise<CirclesNode[]> {
+  public async loadNodes(limit?: number): Promise<CirclesNode[]> {
     const nodes: CirclesNode[] = [];
 
     // we first get individual CRCs that are backers
@@ -364,9 +384,9 @@ export class DataInterface {
       // const isGroup = await this.checkIsGroup(backerAddress as string);
       const tokenAddress = await this.getERC20Token(backerAddress);
       const node: CirclesNode = {
-        avatar: backerAddress,
+        avatar: backerAddress as Address,
         isGroup: false,
-        erc20tokenAddress: tokenAddress!, // we know the tokenAddress must exist, since backing requires wrapping.
+        erc20tokenAddress: tokenAddress! as Address, // we know the tokenAddress must exist, since backing requires wrapping.
         lastUpdated: Date.now(),
       };
       nodes.push(node);
@@ -381,12 +401,13 @@ export class DataInterface {
       const node: CirclesNode = {
         avatar: group.address,
         isGroup: true,
-        erc20tokenAddress: tokenAddress,
+        erc20tokenAddress: tokenAddress as Address,
         mintHandler: group.mintHandler,
         lastUpdated: Date.now(),
       };
       nodes.push(node);
     }
+    if (limit) return nodes.slice(0, limit);
     return nodes;
   }
 
@@ -397,7 +418,7 @@ export class DataInterface {
       // const query = `
       //   SELECT
       //     "tokenAddress",
-      //     "timestamp"
+      //     "timestamp",
       //     "priceInEth"
       //   FROM "V_BPoolPrices"
       //   WHERE "tokenAddress" = ANY($1)

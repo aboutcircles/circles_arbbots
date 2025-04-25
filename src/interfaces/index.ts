@@ -1,16 +1,15 @@
 import { Swap } from "@balancer/sdk";
 
 // @todo: Make these 0xstrings.
-type Currency = string;
-type CirclesAvatar = string;
+export type Address = `0x${string}`;
 
 export interface CirclesNode {
-  avatar: CirclesAvatar;
-  erc20tokenAddress: Currency;
+  avatar: Address;
+  erc20tokenAddress: Address;
   // tokenId: string;
   lastUpdated: number;
   isGroup: boolean;
-  mintHandler?: string;
+  mintHandler?: Address;
   price?: bigint;
 }
 
@@ -41,26 +40,26 @@ export enum Direction {
 }
 
 export interface FetchBalancerQuoteParams {
-  tokenAddress: string;
+  tokenAddress: Address;
   direction?: Direction;
   amount?: bigint;
   logQuote?: boolean;
 }
 
 export interface BalanceRow {
-  account: string;
+  account: Address;
   demurragedTotalBalance: bigint; // or number, depending on how you want to handle the balance
-  tokenAddress: string;
+  tokenAddress: Address;
 }
 
 export interface TrustRelationRow {
-  truster: string;
-  trustee: string;
+  truster: Address;
+  trustee: Address;
 }
 
 export interface BaseGroupRow {
-  address: string;
-  mintHandler: string;
+  address: Address;
+  mintHandler: Address;
 }
 
 export interface LatestPriceRow {
