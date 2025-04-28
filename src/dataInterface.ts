@@ -86,6 +86,8 @@ const hubV2Contract = new Contract(
   wallet,
 );
 
+const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+
 const bouncerOrgContract = new Contract(
   crcBouncerOrgAddress,
   bouncerOrgAbi,
@@ -94,6 +96,7 @@ const bouncerOrgContract = new Contract(
 
 export class DataInterface {
   private client: pg.Client;
+  private loggerClient: pg.Client;
   public quoteReferenceAmount: bigint;
   public referenceToken: Token;
   public logActivity: boolean;
@@ -101,7 +104,7 @@ export class DataInterface {
 
   constructor(
     quoteReferenceAmount: bigint,
-    logActivity: boolean = false,
+    logActivity: boolean,
     collateralToken: Address,
     collateralTokenDecimals: number,
   ) {
@@ -112,6 +115,19 @@ export class DataInterface {
       user: "readonly_user",
       password: process.env.POSTGRESQL_PW,
     });
+
+    this.loggerClient = new pg.Client({
+      host: "db-postgresql-fra1-54201-do-user-1252164-0.h.db.ondigitalocean.com",
+      port: 25060,
+      database: "bot_activity",
+      user: "bot",
+      password: process.env.LOGGERDB_PW,
+      ssl: {
+        rejectUnauthorized: false,
+        mode: "require",
+      },
+    });
+
     this.quoteReferenceAmount = quoteReferenceAmount;
     this.referenceToken = new Token(
       chainId,
@@ -145,21 +161,33 @@ export class DataInterface {
       .catch((err) => {
         console.error("Error connecting to PostgreSQL database", err);
       });
+
+    // Connect to logger database
+    await this.loggerClient
+      .connect()
+      .then(() => {
+        console.log("Connected to Logger database");
+      })
+      .catch((err) => {
+        console.error("Error connecting to Logger database", err);
+      });
   }
+
   async cleanup(): Promise<void> {
     await this.client.end();
+    await this.loggerClient.end();
   }
 
   public async getBalances(tokens: string[]): Promise<BalanceRow[]> {
     try {
       const query = `
-              SELECT
-                  account,
-                  "demurragedTotalBalance"::numeric as "demurragedTotalBalance",
-                  "tokenAddress"
-              FROM "V_CrcV2_BalancesByAccountAndToken"
-              WHERE "tokenAddress" = ANY($1)
-          `;
+            SELECT
+                account,
+                "demurragedTotalBalance"::numeric as "demurragedTotalBalance",
+                "tokenAddress"
+            FROM "V_CrcV2_BalancesByAccountAndToken"
+            WHERE "tokenAddress" = ANY($1)
+        `;
 
       const result = await this.client.query(query, [
         tokens.map((address) => address.toLowerCase()),
@@ -183,9 +211,9 @@ export class DataInterface {
   ): Promise<TrustRelationRow[]> {
     try {
       let query = `
-                SELECT "truster", "trustee"
-                FROM "V_CrcV2_TrustRelations"
-            `;
+              SELECT "truster", "trustee"
+              FROM "V_CrcV2_TrustRelations"
+          `;
 
       const conditions: string[] = [];
       const queryParams: string[] = [];
@@ -222,12 +250,12 @@ export class DataInterface {
   public async getMaxHolder(avatarAddress: string): Promise<Address | null> {
     try {
       const query = `
-        SELECT "account", "demurragedTotalBalance"
-        FROM "V_CrcV2_BalancesByAccountAndToken"
-        WHERE "tokenAddress" = $1
-        ORDER BY "demurragedTotalBalance" DESC
-        LIMIT 1
-      `;
+      SELECT "account", "demurragedTotalBalance"
+      FROM "V_CrcV2_BalancesByAccountAndToken"
+      WHERE "tokenAddress" = $1
+      ORDER BY "demurragedTotalBalance" DESC
+      LIMIT 1
+    `;
 
       const result = await this.client.query(query, [
         avatarAddress.toLowerCase(),
@@ -366,10 +394,10 @@ export class DataInterface {
   private async getCurrentBackers(): Promise<string[]> {
     try {
       const balanceQuery = `
-        SELECT
-          "backer"
-        FROM "CrcV2_CirclesBackingCompleted"
-      `;
+      SELECT
+        "backer"
+      FROM "CrcV2_CirclesBackingCompleted"
+    `;
 
       const balanceResult = await this.client.query(balanceQuery);
       // Extract unique backer addresses from the query result
@@ -383,11 +411,11 @@ export class DataInterface {
   private async getBaseGroups(): Promise<BaseGroupRow[]> {
     try {
       const query = `
-            SELECT
-              "group",
-              "mintHandler"
-            FROM "CrcV2_BaseGroupCreated"
-          `;
+          SELECT
+            "group",
+            "mintHandler"
+          FROM "CrcV2_BaseGroupCreated"
+        `;
 
       const result = await this.client.query(query);
       return result.rows.map((row) => ({
@@ -566,16 +594,16 @@ export class DataInterface {
 
     // if there is no path, we return null
     if (!sorPaths || sorPaths.length === 0) {
-      // if (logQuote) {
-      //   const logValues = [
-      //     Math.floor(Date.now() / 1000),
-      //     this.referenceToken.address,
-      //     targetToken.address,
-      //     null,
-      //     amountOut.toString(),
-      //   ];
-      //   // await loggerClient.query(logQuery, logValues);
-      // }
+      if (logQuote) {
+        const logValues = [
+          Math.floor(Date.now() / 1000),
+          this.referenceToken.address,
+          targetToken.address,
+          null,
+          amount.toString(),
+        ];
+        await this.loggerClient.query(logQuery, logValues);
+      }
       console.log("No path found");
       return null;
     }
@@ -585,17 +613,17 @@ export class DataInterface {
       paths: sorPaths,
       swapKind,
     });
-    // @todo: we're here hardcoding our knowledge of the internals of the fetchBalancerQuote function
-    // if (logQuote) {
-    //   const logValues = [
-    //     Math.floor(Date.now() / 1000),
-    //     inToken.address,
-    //     outToken.address,
-    //     swap.inputAmount.amount.toString(),
-    //     swap.outputAmount.amount.toString(),
-    //   ];
-    //   await loggerClient.query(logQuery, logValues);
-    // }
+
+    if (logQuote) {
+      const logValues = [
+        Math.floor(Date.now() / 1000),
+        tokenIn.address,
+        tokenOut.address,
+        swap.inputAmount.amount.toString(),
+        swap.outputAmount.amount.toString(),
+      ];
+      await this.loggerClient.query(logQuery, logValues);
+    }
 
     // @dev We attempt to make this call to validate the swap parameters, ensuring we avoid potential errors such as `BAL#305` or other issues related to swap input parameters.
     const result = await swap
