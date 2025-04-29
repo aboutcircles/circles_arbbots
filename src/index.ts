@@ -8,12 +8,14 @@ import {
   Direction,
   Address,
 } from "./interfaces/index.js";
+import { Swap } from "@balancer/sdk";
 
 // global variables
 const LOG_ACTIVITY = false;
 const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
 const EXPLORATION_RATE = 0.1;
 const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
+const SELLOFF_PRECISION = BigInt(1e12);
 const PROFIT_THRESHOLD = 0n; // profit threshold, should be denominated in the colalteral curreny
 // const GROUPS_CAP_LIQUIDITY = BigInt(500 * 1e18);
 const RESYNC_INTERVAL = 1000 * 60 * 15; // Resync every 15 minutes
@@ -23,7 +25,7 @@ const TRADING_TOKEN =
   "0x6c76971f98945ae98dd7d4dfca8711ebea946ea6".toLowerCase() as Address; // wstETH
 const TRADING_TOKEN_DECIMALS = 18;
 const QUOTE_TOKEN =
-  "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d".toLowerCase() as Address; // wstETH
+  "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d".toLowerCase() as Address; // xDAI
 const QUOTE_TOKEN_DEMICALS = 18;
 const DEBUG = true; // Toggle detailed logging
 const NODE_LIMIT = 5;
@@ -36,14 +38,14 @@ class ArbitrageBot {
   constructor(explorationRate: number = EXPLORATION_RATE) {
     this.graph = new DirectedGraph();
     this.explorationRate = explorationRate;
-    this.dataInterface = new DataInterface(
-      QUERY_REFERENCE_AMOUNT,
-      LOG_ACTIVITY,
-      TRADING_TOKEN,
-      TRADING_TOKEN_DECIMALS,
-      QUOTE_TOKEN,
-      QUOTE_TOKEN_DEMICALS,
-    );
+    this.dataInterface = new DataInterface({
+      quoteReferenceAmount: QUERY_REFERENCE_AMOUNT,
+      logActivity: LOG_ACTIVITY,
+      quotingToken: QUOTE_TOKEN,
+      collateralTokenDecimals: QUOTE_TOKEN_DEMICALS,
+      tradingToken: TRADING_TOKEN,
+      tradingTokenDecimals: TRADING_TOKEN_DECIMALS,
+    });
   }
 
   // Add an init method to ArbitrageBot
@@ -365,7 +367,7 @@ class ArbitrageBot {
   ): Promise<Trade | null> {
     let currentAmount = MIN_BUYING_AMOUNT;
 
-    let collateralBalance = await this.dataInterface.getCollateralBalance();
+    let collateralBalance = await this.dataInterface.getTradingTokenBalance();
 
     // Get initial quotes
     const initialBuyQuote = await this.dataInterface.getTradingQuote({
@@ -391,6 +393,8 @@ class ArbitrageBot {
     let bestTrade: Trade = {
       buyQuote: initialBuyQuote,
       sellQuote: initialSellQuote,
+      buyNode: source,
+      sellNode: target,
       amount: currentAmount,
       profit:
         initialSellQuote.outputAmount.amount -
@@ -433,6 +437,8 @@ class ArbitrageBot {
       bestTrade = {
         buyQuote,
         sellQuote,
+        buyNode: source,
+        sellNode: target,
         amount: currentAmount,
         profit: currentProfit,
       };
@@ -441,26 +447,95 @@ class ArbitrageBot {
     return bestTrade;
   }
 
-  private async executeTrade(trade: Trade): Promise<boolean> {
-    // @todo: We need to consider the actual amounts that are being achieved here...
-    console.log("Executing chosen trade:");
-    console.log("Buy quote:", trade.buyQuote);
-    console.log("Sell quote:", trade.sellQuote);
+  async sellOffLeftoverCRC(tokenAddress: Address): Promise<void> {
+    // Check if we have any remaining balance of either intermediate token
+    const remainingBalance =
+      await this.dataInterface.getBotERC20Balance(tokenAddress);
+
+    // If we have any remaining balances, try to sell them back
+    if (remainingBalance > SELLOFF_PRECISION) {
+      console.log("Cleaning up remaining bought token ", tokenAddress);
+      const cleanupQuote = await this.dataInterface.getTradingQuote({
+        tokenAddress: tokenAddress,
+        direction: Direction.SELL,
+        amount: remainingBalance,
+      });
+      if (cleanupQuote) {
+        await this.dataInterface.execSwap(cleanupQuote, Direction.SELL);
+      }
+    }
+  }
+
+  async executeTrade(trade: Trade): Promise<boolean> {
+    console.log("Attempting to executing trade with following parameters:");
     console.log("Amount:", trade.amount.toString());
     console.log("Expected profit:", trade.profit.toString());
 
-    return true;
+    try {
+      // Step 1: Execute the initial buy with fixed input
+      console.log("Step 1: Executing initial buy...");
+      const buyResult = await this.dataInterface.execSwap(
+        trade.buyQuote,
+        Direction.BUY,
+      );
+      if (!buyResult) {
+        console.log("Initial buy failed, aborting trade");
+        return false;
+      }
+
+      const actualBoughtAmount = await this.dataInterface.getBotERC20Balance(
+        trade.buyQuote.outputAmount.token.address,
+      );
+      console.log("Actually bought amount:", actualBoughtAmount.toString());
+
+      // Step 2: Transfer to target token
+      console.log("Step 2: Transferring to target token...");
+      // In this step, we'll try and transfer as much as we can using the pathfinder. The transferResult is the amount we managed to transfer (in demurragedUnits)
+      const transferResult = await this.dataInterface.changeCRC({
+        from: trade.buyNode,
+        to: trade.sellNode,
+        requestedAmount: actualBoughtAmount, // @todo: need to calculate this in
+      });
+
+      if (transferResult == 0n) {
+        console.log(
+          "Transfer failed, attempting to sell back initial tokens...",
+        );
+      } else {
+        // Step 3: Execute final sell
+        console.log("Step 3: Executing final sell...");
+        // Get new sell quote based on actual amount
+        const finalSellQuote = await this.dataInterface.getTradingQuote({
+          tokenAddress: trade.sellQuote.inputAmount.token.address as Address,
+          direction: Direction.SELL,
+          amount: transferResult,
+        });
+        if (!finalSellQuote) {
+          console.log(
+            "Could not get final sell quote, attempting to sell back initial tokens...",
+          );
+        } else {
+          // Execute final sell
+          const sellResult = await this.dataInterface.execSwap(
+            finalSellQuote,
+            Direction.SELL,
+          );
+          if (!sellResult) {
+            console.log("Final sell failed");
+          }
+        }
+      }
+
+      // Clean Up
+      console.log("Cleaning up any leftover amounts of the CRC");
+      await this.sellOffLeftoverCRC(trade.buyQuote.outputAmount.token.address);
+      await this.sellOffLeftoverCRC(trade.sellQuote.inputAmount.token.address);
+      return true;
+    } catch (error) {
+      console.error("Error during trade execution:", error);
+      return false;
+    }
   }
-
-  //   // First we buy,
-  //   await this.dataInterface.execSwap(trade.buyQuote, Direction.BUY);
-
-  //   // then we transfer,
-  //   await this.sdk.transfer();
-
-  //   // and then we sell
-  //   await this.dataInterface.execSwap(trade.sellQuote, Direction.SELL);
-  // }
 
   private async resyncGraph() {
     // @dev: for now we just reinitialise the Graph but down the line

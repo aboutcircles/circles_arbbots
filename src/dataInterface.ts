@@ -94,23 +94,26 @@ const bouncerOrgContract = new Contract(
   provider,
 );
 
+interface DataInterfaceParams {
+  quoteReferenceAmount: bigint;
+  logActivity: boolean;
+  quotingToken: Address;
+  collateralTokenDecimals: number;
+  tradingToken: Address;
+  tradingTokenDecimals: number;
+}
+
 export class DataInterface {
   private client: pg.Client;
   private loggerClient: pg.Client;
   public quoteReferenceAmount: bigint;
-  public quoteReferenceToken: Token;
+  public quotingToken: Token;
   public tradingToken: Token;
   public logActivity: boolean;
   public sdk?: Sdk;
+  public sdkAvatar?: Avatar;
 
-  constructor(
-    quoteReferenceAmount: bigint,
-    logActivity: boolean,
-    collateralToken: Address,
-    collateralTokenDecimals: number,
-    tradingToken: Address,
-    tradingTokenDecimals: number,
-  ) {
+  constructor(params: DataInterfaceParams) {
     this.client = new pg.Client({
       host: "144.76.163.174",
       port: 5432,
@@ -130,22 +133,25 @@ export class DataInterface {
       },
     });
 
-    this.quoteReferenceAmount = quoteReferenceAmount;
-    this.quoteReferenceToken = new Token(
+    this.quoteReferenceAmount = params.quoteReferenceAmount;
+
+    console.log("loading quoting token", params.quotingToken);
+    this.quotingToken = new Token(
       chainId,
-      collateralToken,
-      Number(collateralTokenDecimals),
+      params.quotingToken,
+      Number(params.collateralTokenDecimals),
       "Quote Token",
     );
 
+    console.log("loading trading token", params.tradingToken);
     this.tradingToken = new Token(
       chainId,
-      tradingToken,
-      Number(tradingTokenDecimals),
+      params.tradingToken,
+      Number(params.tradingTokenDecimals),
       "Trading Token",
     );
 
-    this.logActivity = logActivity;
+    this.logActivity = params.logActivity;
   }
 
   async init(): Promise<void> {
@@ -181,6 +187,9 @@ export class DataInterface {
       .catch((err) => {
         console.error("Error connecting to Logger database", err);
       });
+
+    console.log("Loading bot avatar with address ", wallet.address);
+    this.sdkAvatar = await this.sdk.getAvatar(wallet.address as Address);
   }
 
   async cleanup(): Promise<void> {
@@ -282,6 +291,85 @@ export class DataInterface {
     }
   }
 
+  public async changeCRC(params: {
+    from: CirclesNode;
+    to: CirclesNode;
+    requestedAmount: bigint;
+  }): Promise<bigint> {
+    const toAddress = params.to.isGroup
+      ? params.to.mintHandler!
+      : crcBouncerOrgAddress;
+    const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
+
+    if (!params.to.isGroup) {
+      const trustUpdated = await this.updateBouncerOrgTrust(params.to.avatar);
+      if (!trustUpdated) {
+        return 0n;
+      }
+    }
+    const maxTransferableAmount = await this.getMaxTransferableAmount({
+      from: wallet.address as Address,
+      to: toAddress,
+      toTokens: toTokens,
+    });
+
+    const amountToTransfer =
+      params.requestedAmount > maxTransferableAmount
+        ? maxTransferableAmount
+        : params.requestedAmount;
+
+    const transferSuccessful = await this.sdkAvatar!.transfer(
+      toAddress,
+      amountToTransfer,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      toTokens,
+    );
+
+    if (!transferSuccessful) {
+      return 0n;
+    }
+
+    return amountToTransfer;
+  }
+
+  public async getMaxTransferableAmount(params: {
+    from: Address;
+    to: Address;
+    fromTokens?: Address[];
+    toTokens?: Address[];
+  }): Promise<bigint> {
+    const findPathPayload = {
+      jsonrpc: "2.0",
+      id: 0,
+      method: "circlesV2_findPath",
+      params: [
+        {
+          Source: params.from,
+          Sink: params.to,
+          FromTokens: params.fromTokens,
+          ToTokens: params.toTokens,
+          WithWrapped: true,
+          TargetFlow: "99999999999999999999999999999999999",
+        },
+      ],
+    };
+
+    const response = await fetch("https://rpc.aboutcircles.com/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(findPathPayload),
+    });
+
+    const data = await response.json();
+
+    return data.result.maxFlow;
+  }
+
   public async getSimulatedLiquidity(
     source: CirclesNode,
     target: CirclesNode,
@@ -293,53 +381,21 @@ export class DataInterface {
         return 0n;
       }
 
-      const findPathPayload = {
-        jsonrpc: "2.0",
-        id: 0,
-        method: "circlesV2_findPath",
-        params: [
-          {
-            Source: maxHolder,
-            Sink: target.isGroup ? target.mintHandler! : target.avatar, // we're using the fact that all hunman account trust themselves (and cannot do otherwise)
-            FromTokens: [source.avatar],
-            ToTokens: target.isGroup ? undefined : [target.avatar],
-            WithWrapped: true,
-            TargetFlow: "99999999999999999999999999999999999",
-          },
-        ],
-      };
+      const to = target.isGroup ? target.mintHandler! : target.avatar; // we're using the fact that all hunman account trust themselves (and cannot do otherwise)
+      const fromTokens = [source.avatar];
+      const toTokens = target.isGroup ? undefined : [target.avatar];
 
-      const response = await fetch("https://rpc.aboutcircles.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(findPathPayload),
+      const maxTransferableAmount = await this.getMaxTransferableAmount({
+        from: maxHolder,
+        to: to,
+        fromTokens: fromTokens,
+        toTokens: toTokens,
       });
-
-      const data = await response.json();
-
-      const maxTransferableAmount = data.result.maxFlow;
-
-      // Handle the float conversion properly
-      // const amountWith18Decimals = maxTransferableAmount * Math.pow(10, 18);
-      // const roundedAmount = Math.round(amountWith18Decimals);
-
-      // // Add safety check
-      // if (!Number.isFinite(roundedAmount)) {
-      //   console.warn(
-      //     `Invalid amount after conversion: ${maxTransferableAmount}`,
-      //   );
-      //   return 0n;
-      // }
-
-      // Convert to BigInt via string to avoid scientific notation issues
-      const demurragedAmount = BigInt(maxTransferableAmount);
 
       // Convert demurraged to inflationary
       return await this.convertDemurrageToInflationary(
         target.erc20tokenAddress,
-        demurragedAmount,
+        maxTransferableAmount,
       );
     } catch (error) {
       console.error("Error in getSimulatedLiquidity:", error);
@@ -539,13 +595,13 @@ export class DataInterface {
    * @param tokenAddress The address of the ERC20 token.
    * @return {Promise<bigint>} A promise that resolves to the token balance as a bigint.
    */
-  public async getCollateralBalance(): Promise<bigint> {
+  public async getTradingTokenBalance(): Promise<bigint> {
+    return await this.getBotERC20Balance(this.tradingToken.address);
+  }
+
+  public async getBotERC20Balance(tokenAddress: Address): Promise<bigint> {
     // Create a contract instance for the token
-    const tokenContract = new Contract(
-      this.quoteReferenceToken.address,
-      erc20Abi,
-      provider,
-    );
+    const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the balance
     let balance = await tokenContract.balanceOf(wallet.address);
@@ -561,7 +617,7 @@ export class DataInterface {
     );
 
     return this.fetchBalancerQuote({
-      tokenIn: this.quoteReferenceToken,
+      tokenIn: this.quotingToken,
       tokenOut: targetToken,
       direction: Direction.BUY,
       amount: this.quoteReferenceAmount,

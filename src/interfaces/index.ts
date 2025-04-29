@@ -21,6 +21,8 @@ export interface CirclesEdge {
 export interface Trade {
   buyQuote: Swap;
   sellQuote: Swap;
+  buyNode: CirclesNode;
+  sellNode: CirclesNode;
   amount: bigint;
   profit: bigint;
 }
