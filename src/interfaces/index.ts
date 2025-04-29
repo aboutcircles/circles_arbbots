@@ -1,4 +1,4 @@
-import { Swap } from "@balancer/sdk";
+import { Swap, Token } from "@balancer/sdk";
 
 // @todo: Make these 0xstrings.
 export type Address = `0x${string}`;
@@ -40,9 +40,10 @@ export enum Direction {
 }
 
 export interface FetchBalancerQuoteParams {
-  tokenAddress: Address;
-  direction?: Direction;
-  amount?: bigint;
+  tokenIn: Token;
+  tokenOut: Token;
+  direction: Direction;
+  amount: bigint;
   logQuote?: boolean;
 }
 

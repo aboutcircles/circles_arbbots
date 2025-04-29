@@ -17,10 +17,14 @@ const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
 const PROFIT_THRESHOLD = 0n; // profit threshold, should be denominated in the colalteral curreny
 // const GROUPS_CAP_LIQUIDITY = BigInt(500 * 1e18);
 const RESYNC_INTERVAL = 1000 * 60 * 15; // Resync every 15 minutes
-const DEFAULT_PRICE_REF_ADDRESS = "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b"; // METRI TEST SUPERGROUP
-const COLLATERAL_TOKEN =
-  "0x6c76971f98945ae98dd7d4dfca8711ebea946ea6" as Address; // wstETH
-const COLLATERAL_TOKEN_DECIMALS = 18;
+const DEFAULT_PRICE_REF_ADDRESS =
+  "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b".toLowerCase() as Address; // METRI TEST SUPERGROUP
+const TRADING_TOKEN =
+  "0x6c76971f98945ae98dd7d4dfca8711ebea946ea6".toLowerCase() as Address; // wstETH
+const TRADING_TOKEN_DECIMALS = 18;
+const QUOTE_TOKEN =
+  "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d".toLowerCase() as Address; // wstETH
+const QUOTE_TOKEN_DEMICALS = 18;
 const DEBUG = true; // Toggle detailed logging
 const NODE_LIMIT = 5;
 
@@ -35,8 +39,10 @@ class ArbitrageBot {
     this.dataInterface = new DataInterface(
       QUERY_REFERENCE_AMOUNT,
       LOG_ACTIVITY,
-      COLLATERAL_TOKEN,
-      COLLATERAL_TOKEN_DECIMALS,
+      TRADING_TOKEN,
+      TRADING_TOKEN_DECIMALS,
+      QUOTE_TOKEN,
+      QUOTE_TOKEN_DEMICALS,
     );
   }
 
@@ -248,14 +254,14 @@ class ArbitrageBot {
   private async updateValues(edgeKey: string): Promise<EdgeInfo> {
     const edgeInfo = this.getEdgeInfo(edgeKey);
 
-    const currentSourcePrice = await this.getCurrentPrice(edgeInfo.source);
+    const currentSourcePrice = await this.getCurrentSpotPrice(edgeInfo.source);
     console.log(
       "Updated price for ",
       edgeInfo.source.avatar,
       ": ",
       currentSourcePrice,
     );
-    const currentTargetPrice = await this.getCurrentPrice(edgeInfo.target);
+    const currentTargetPrice = await this.getCurrentSpotPrice(edgeInfo.target);
     console.log(
       "Updated price for ",
       edgeInfo.target.avatar,
@@ -308,9 +314,9 @@ class ArbitrageBot {
     const referenceToken = await this.dataInterface.getERC20Token(
       DEFAULT_PRICE_REF_ADDRESS,
     );
-    const referencePrice = (await this.dataInterface.fetchBalancerQuote({
-      tokenAddress: referenceToken! as Address,
-    }))!.inputAmount.amount;
+    const referencePrice = (await this.dataInterface.getSpotPrice(
+      referenceToken! as Address,
+    ))!.inputAmount.amount;
 
     const latestPrices = await this.dataInterface.fetchLatestPrices(
       nodes.map((node) => node.erc20tokenAddress),
@@ -335,10 +341,10 @@ class ArbitrageBot {
     return nodes;
   }
 
-  private async getCurrentPrice(node: CirclesNode): Promise<bigint | null> {
-    const swapData = await this.dataInterface.fetchBalancerQuote({
-      tokenAddress: node.erc20tokenAddress,
-    });
+  private async getCurrentSpotPrice(node: CirclesNode): Promise<bigint | null> {
+    const swapData = await this.dataInterface.getSpotPrice(
+      node.erc20tokenAddress,
+    );
     if (!swapData) {
       return null;
     }
@@ -362,13 +368,13 @@ class ArbitrageBot {
     let collateralBalance = await this.dataInterface.getCollateralBalance();
 
     // Get initial quotes
-    const initialBuyQuote = await this.dataInterface.fetchBalancerQuote({
+    const initialBuyQuote = await this.dataInterface.getTradingQuote({
       tokenAddress: source.erc20tokenAddress,
       direction: Direction.BUY,
       amount: currentAmount,
     });
 
-    const initialSellQuote = await this.dataInterface.fetchBalancerQuote({
+    const initialSellQuote = await this.dataInterface.getTradingQuote({
       tokenAddress: target.erc20tokenAddress,
       direction: Direction.SELL,
       amount: currentAmount,
@@ -396,13 +402,13 @@ class ArbitrageBot {
       currentAmount *= 2n;
 
       // Get quotes for reduced amount
-      const buyQuote = await this.dataInterface.fetchBalancerQuote({
+      const buyQuote = await this.dataInterface.getTradingQuote({
         tokenAddress: source.erc20tokenAddress,
         direction: Direction.BUY,
         amount: currentAmount,
       });
 
-      const sellQuote = await this.dataInterface.fetchBalancerQuote({
+      const sellQuote = await this.dataInterface.getTradingQuote({
         tokenAddress: target.erc20tokenAddress,
         direction: Direction.SELL,
         amount: currentAmount,

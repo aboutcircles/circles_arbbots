@@ -98,7 +98,8 @@ export class DataInterface {
   private client: pg.Client;
   private loggerClient: pg.Client;
   public quoteReferenceAmount: bigint;
-  public referenceToken: Token;
+  public quoteReferenceToken: Token;
+  public tradingToken: Token;
   public logActivity: boolean;
   public sdk?: Sdk;
 
@@ -107,6 +108,8 @@ export class DataInterface {
     logActivity: boolean,
     collateralToken: Address,
     collateralTokenDecimals: number,
+    tradingToken: Address,
+    tradingTokenDecimals: number,
   ) {
     this.client = new pg.Client({
       host: "144.76.163.174",
@@ -124,17 +127,24 @@ export class DataInterface {
       password: process.env.LOGGERDB_PW,
       ssl: {
         rejectUnauthorized: false,
-        mode: "require",
       },
     });
 
     this.quoteReferenceAmount = quoteReferenceAmount;
-    this.referenceToken = new Token(
+    this.quoteReferenceToken = new Token(
       chainId,
       collateralToken,
       Number(collateralTokenDecimals),
-      "Reference Token",
+      "Quote Token",
     );
+
+    this.tradingToken = new Token(
+      chainId,
+      tradingToken,
+      Number(tradingTokenDecimals),
+      "Trading Token",
+    );
+
     this.logActivity = logActivity;
   }
 
@@ -465,6 +475,7 @@ export class DataInterface {
     return nodes;
   }
 
+  // @dev: function for fetching a historical Price (currently) dummy because no such data source exists.
   public async fetchLatestPrices(
     tokenAddresses: string[],
   ): Promise<Map<string, LatestPriceRow | null>> {
@@ -531,7 +542,7 @@ export class DataInterface {
   public async getCollateralBalance(): Promise<bigint> {
     // Create a contract instance for the token
     const tokenContract = new Contract(
-      this.referenceToken.address,
+      this.quoteReferenceToken.address,
       erc20Abi,
       provider,
     );
@@ -541,37 +552,76 @@ export class DataInterface {
     return balance;
   }
 
+  public async getSpotPrice(tokenAddress: Address): Promise<Swap | null> {
+    const targetToken = new Token(
+      chainId,
+      tokenAddress as Address,
+      18,
+      "Target Token",
+    );
+
+    return this.fetchBalancerQuote({
+      tokenIn: this.quoteReferenceToken,
+      tokenOut: targetToken,
+      direction: Direction.BUY,
+      amount: this.quoteReferenceAmount,
+      logQuote: this.logActivity,
+    });
+  }
+
+  public async getTradingQuote(params: {
+    tokenAddress: Address;
+    direction: Direction;
+    amount: bigint;
+  }): Promise<Swap | null> {
+    const targetToken = new Token(
+      chainId,
+      params.tokenAddress as Address,
+      18,
+      "Target Token",
+    );
+
+    let tokenIn;
+    let tokenOut;
+    if (params.direction == Direction.BUY) {
+      tokenIn = this.tradingToken;
+      tokenOut = targetToken;
+    } else if (params.direction == Direction.SELL) {
+      tokenIn = targetToken;
+      tokenOut = this.tradingToken;
+    } else {
+      console.error("ERROR: Unknown trade direction requested");
+      return null;
+    }
+
+    return this.fetchBalancerQuote({
+      tokenIn: tokenIn,
+      tokenOut: tokenOut,
+      direction: params.direction,
+      amount: params.amount,
+      logQuote: false, // we're only collecting price quotes for the quote reference token
+    });
+  }
+
   /**
    * @notice Fetches the latest Balancer swap quote for a token.
    * @param tokenAddress The token address to get a quote for.
    * @param amountOut The output amount for the swap.
    * @return {Promise<Swap | null>} A promise that resolves to a Swap object if a valid path is found, or null otherwise.
    */
-  public async fetchBalancerQuote({
-    tokenAddress,
-    direction = Direction.BUY,
-    amount = this.quoteReferenceAmount,
+  private async fetchBalancerQuote({
+    tokenIn,
+    tokenOut,
+    direction,
+    amount,
     logQuote = this.logActivity,
   }: FetchBalancerQuoteParams): Promise<Swap | null> {
-    const targetToken = new Token(
-      chainId,
-      tokenAddress as `0x${string}`,
-      18,
-      "Member Token",
-    );
-
-    let tokenIn;
-    let tokenOut;
-    let swapKind;
-    let swapAmount;
+    let swapKind: SwapKind;
+    let swapAmount: TokenAmount;
     if (direction == Direction.BUY) {
-      tokenIn = this.referenceToken;
-      tokenOut = targetToken;
       swapKind = SwapKind.GivenOut;
       swapAmount = TokenAmount.fromRawAmount(tokenOut, amount);
     } else if (direction == Direction.SELL) {
-      tokenIn = targetToken;
-      tokenOut = this.referenceToken;
       swapKind = SwapKind.GivenIn;
       swapAmount = TokenAmount.fromRawAmount(tokenIn, amount);
     } else {
@@ -597,8 +647,8 @@ export class DataInterface {
       if (logQuote) {
         const logValues = [
           Math.floor(Date.now() / 1000),
-          this.referenceToken.address,
-          targetToken.address,
+          tokenIn.address,
+          tokenOut.address,
           null,
           amount.toString(),
         ];
