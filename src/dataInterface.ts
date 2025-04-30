@@ -313,7 +313,7 @@ export class DataInterface {
       toTokens: toTokens,
     });
 
-    const amountToTransfer =
+    let amountToTransfer =
       params.requestedAmount > maxTransferableAmount
         ? maxTransferableAmount
         : params.requestedAmount;
@@ -401,33 +401,6 @@ export class DataInterface {
       console.error("Error in getSimulatedLiquidity:", error);
       return 0n;
     }
-  }
-
-  /**
-   * @notice Converts a demurrage token amount to its corresponding inflationary value.
-   * @param tokenAddress The address of the inflationary token.
-   * @param amount The amount to convert.
-   * @return {Promise<bigint>} A promise that resolves to the converted inflationary value.
-   */
-  private async convertDemurrageToInflationary(
-    tokenAddress: string,
-    amount: bigint,
-  ): Promise<bigint> {
-    const inflationaryTokenContract = new Contract(
-      tokenAddress,
-      inflationaryTokenAbi,
-      wallet,
-    );
-    const days = await inflationaryTokenContract.day(
-      (await provider.getBlock("latest"))?.timestamp,
-    );
-    const inflationaryValue =
-      await inflationaryTokenContract.convertDemurrageToInflationaryValue(
-        amount,
-        days,
-      );
-
-    return inflationaryValue;
   }
 
   /**
@@ -623,6 +596,24 @@ export class DataInterface {
       amount: this.quoteReferenceAmount,
       logQuote: this.logActivity,
     });
+  }
+
+  public async getBotERC20BalanceWithRetry(
+    tokenAddress: Address,
+    maxRetries: number = 5,
+    delayMs: number = 2000,
+  ): Promise<bigint> {
+    for (let i = 0; i < maxRetries; i++) {
+      const balance = await this.getBotERC20Balance(tokenAddress);
+      if (balance > 0n) {
+        return balance;
+      }
+      console.log(
+        `Attempt ${i + 1}: Balance still 0, waiting ${delayMs}ms before retry...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    return 0n;
   }
 
   public async getTradingQuote(params: {
@@ -864,59 +855,58 @@ export class DataInterface {
       });
   }
 
-  // private async getBalancesEstimator(): Promise<SparseMatrix> {
-  //   try {
-  //     const balanceQuery = `
-  //       SELECT
-  //         "account",
-  //         "tokenAddress",
-  //         "balance"
-  //       FROM "V_CrcV2_BalancesByAccountAndToken"
-  //       WHERE "balance" > 0
-  //     `;
+  /**
+   * @notice Converts an inflationary token amount to its corresponding demurrage-adjusted value.
+   * @param tokenAddress The address of the inflationary token.
+   * @param amount The amount to convert.
+   * @return {Promise<bigint>} A promise that resolves to the converted demurrage value.
+   */
+  public async convertInflationaryToDemurrage(
+    tokenAddress: string,
+    amount: bigint,
+  ): Promise<bigint> {
+    // @todo replace with a single onchain view function
+    const inflationaryTokenContract = new Contract(
+      tokenAddress,
+      inflationaryTokenAbi,
+      wallet,
+    );
+    const days = await inflationaryTokenContract.day(
+      (await provider.getBlock("latest"))?.timestamp,
+    );
+    const demurrageValue =
+      await inflationaryTokenContract.convertInflationaryToDemurrageValue(
+        amount,
+        days,
+      );
 
-  //     const balanceResult = await this.client.query(balanceQuery);
+    return demurrageValue;
+  }
 
-  //     const accounts = new Set<string>();
-  //     const tokens = new Set<string>();
-  //     balanceResult.rows.forEach(row => {
-  //       accounts.add(row.account);
-  //       tokens.add(row.tokenAddress);
-  //     });
+  /**
+   * @notice Converts a demurrage token amount to its corresponding inflationary value.
+   * @param tokenAddress The address of the inflationary token.
+   * @param amount The amount to convert.
+   * @return {Promise<bigint>} A promise that resolves to the converted inflationary value.
+   */
+  public async convertDemurrageToInflationary(
+    tokenAddress: string,
+    amount: bigint,
+  ): Promise<bigint> {
+    const inflationaryTokenContract = new Contract(
+      tokenAddress,
+      inflationaryTokenAbi,
+      wallet,
+    );
+    const days = await inflationaryTokenContract.day(
+      (await provider.getBlock("latest"))?.timestamp,
+    );
+    const inflationaryValue =
+      await inflationaryTokenContract.convertDemurrageToInflationaryValue(
+        amount,
+        days,
+      );
 
-  //     const accountArray = Array.from(accounts);
-  //     const tokenArray = Array.from(tokens);
-
-  //     const accountToIndex = new Map(accountArray.map((acc, i) => [acc, i]));
-  //     this.tokenToIndex = new Map(tokenArray.map((token, i) => [token, i]));
-
-  //     const entries = balanceResult.rows.map(row => ({
-  //       i: accountToIndex.get(row.account)!,
-  //       j: this.tokenToIndex.get(row.tokenAddress)!,
-  //       value: parseFloat(row.balance)
-  //     }));
-
-  //     return sparse(entries, [accounts.size, tokens.size]);
-  //   } catch (error) {
-  //     console.error('Error fetching balances:', error);
-  //     throw error;
-  //   }
-  // }
-
-  // async getMatrices(): Promise<{
-  //   trustMatrix: SparseMatrix;
-  //   balanceMatrix: SparseMatrix;
-  //   avatarToIndex: Map<string, number>;
-  //   tokenToIndex: Map<string, number>;
-  // }> {
-  //   const trustMatrix = await this.getTrustGraphEstimator();
-  //   const balanceMatrix = await this.getBalancesEstimator();
-
-  //   return {
-  //     trustMatrix,
-  //     balanceMatrix,
-  //     avatarToIndex: this.avatarToIndex!,
-  //     tokenToIndex: this.tokenToIndex!
-  //   };
-  // }
+    return inflationaryValue;
+  }
 }

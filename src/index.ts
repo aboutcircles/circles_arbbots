@@ -7,6 +7,8 @@ import {
   EdgeInfo,
   Direction,
   Address,
+  BalanceRow,
+  TrustRelationRow,
 } from "./interfaces/index.js";
 import { Swap } from "@balancer/sdk";
 
@@ -27,7 +29,6 @@ const TRADING_TOKEN_DECIMALS = 18;
 const QUOTE_TOKEN =
   "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d".toLowerCase() as Address; // xDAI
 const QUOTE_TOKEN_DEMICALS = 18;
-const DEBUG = true; // Toggle detailed logging
 const NODE_LIMIT = 5;
 
 class ArbitrageBot {
@@ -57,104 +58,143 @@ class ArbitrageBot {
     console.log("Starting graph initialization...");
     console.time("Graph initialization");
 
-    // Get accounts with presumable liquidity
-    console.log("Loading nodes...");
+    // 1. Get initial nodes and ensure uniqueness by avatar
+    console.log("Loading initial nodes...");
     let nodes = await this.dataInterface.loadNodes(NODE_LIMIT);
-    console.log(`Loaded ${nodes.length} nodes`);
+    // Deduplicate nodes by avatar
+    nodes = Array.from(
+      new Map(nodes.map((node) => [node.avatar, node])).values(),
+    );
+    console.log(`Loaded ${nodes.length} unique initial nodes`);
 
+    // 2. Get all group members first
+    console.log("Fetching group members...");
+    const groupNodes = nodes.filter((node) => node.isGroup);
+    const groupMemberRelations = await this.dataInterface.getTrustRelations({
+      trusters: groupNodes.map((node) => node.avatar),
+    });
+    const groupMemberAddresses = [
+      ...new Set(groupMemberRelations.map((rel) => rel.trustee)),
+    ];
+
+    // 3. Fetch all relevant addresses for data queries (ensuring uniqueness)
+    const allRelevantAddresses = [
+      ...new Set([
+        ...nodes.map((node) => node.avatar),
+        ...groupMemberAddresses,
+      ]),
+    ];
+
+    // 4. Fetch all data in bulk
+    console.log("Fetching bulk data...");
+    const [allBalances, allTrustRelations] = await Promise.all([
+      this.dataInterface.getBalances(allRelevantAddresses),
+      this.dataInterface.getTrustRelations(),
+    ]);
+
+    // 5. Create lookup maps
+    const balancesByAccount = new Map<string, BalanceRow[]>();
+    allBalances.forEach((balance) => {
+      if (!balancesByAccount.has(balance.account)) {
+        balancesByAccount.set(balance.account, []);
+      }
+      balancesByAccount.get(balance.account)!.push(balance);
+    });
+
+    const trustRelationsByTrustee = new Map<string, TrustRelationRow[]>();
+    allTrustRelations.forEach((trust) => {
+      if (!trustRelationsByTrustee.has(trust.trustee)) {
+        trustRelationsByTrustee.set(trust.trustee, []);
+      }
+      trustRelationsByTrustee.get(trust.trustee)!.push(trust);
+    });
+
+    // 6. Estimate prices
     console.log("Estimating prices...");
     nodes = await this.estimatePrices(nodes);
-    console.log("Price estimation complete");
 
-    // Add all nodes first
-    console.log("Adding nodes to graph...");
-    for (let node of nodes) {
+    // 7. Add all nodes to graph
+    console.log("Creating complete graph...");
+    for (const node of nodes) {
       this.graph.addNode(node.avatar, node);
     }
-    console.log(`Added ${nodes.length} nodes to graph`);
 
-    // Add edges
-    console.log("Starting edge creation...");
+    // 8. Create complete graph with initial zero liquidity
+    console.log(`Creating edges between ${nodes.length} nodes...`);
     let edgeCount = 0;
+    for (const sourceNode of nodes) {
+      for (const targetNode of nodes) {
+        if (sourceNode === targetNode) continue;
 
-    for (const targetNode of nodes) {
-      if (DEBUG)
-        console.log(
-          `Processing target node: ${targetNode.avatar.slice(0, 8)}...`,
-        );
-
-      let balances;
-      if (targetNode.isGroup) {
-        if (DEBUG)
-          console.log(
-            `Fetching group members for ${targetNode.avatar.slice(0, 8)}...`,
-          );
-        const groupMembers = await this.dataInterface.getTrustRelations({
-          trusters: [targetNode.avatar],
+        this.graph.addEdge(sourceNode.avatar, targetNode.avatar, {
+          liquidity: BigInt(0),
+          lastUpdated: Date.now(),
         });
-        balances = await this.dataInterface.getBalances(
-          groupMembers.map((member) => member.trustee),
-        );
-      } else {
-        balances = await this.dataInterface.getBalances([targetNode.avatar]);
+        edgeCount++;
+        if (edgeCount % 1000 === 0) {
+          console.log(`Created ${edgeCount} edges so far...`);
+        }
       }
+    }
 
-      for (const sourceNode of nodes) {
-        if (sourceNode == targetNode) continue;
+    // 9. Calculate and update actual liquidity for edges
+    console.log("Calculating edge liquidity...");
+    for (const sourceNode of nodes) {
+      for (const targetNode of nodes) {
+        if (sourceNode === targetNode) continue;
 
-        if (DEBUG)
-          console.log(
-            `Processing source node: ${sourceNode.avatar.slice(0, 8)}...`,
+        let relevantBalances: BalanceRow[] = [];
+        if (targetNode.isGroup) {
+          // For group targets, get balances of all group members
+          const groupMembers = groupMemberRelations.filter(
+            (rel) => rel.truster === targetNode.avatar,
           );
-
-        let trustRelations;
-        if (sourceNode.isGroup) {
-          const groupMembers = await this.dataInterface.getTrustRelations({
-            trusters: [sourceNode.avatar],
-          });
-          trustRelations = await this.dataInterface.getTrustRelations({
-            trustees: groupMembers.map((member) => member.trustee),
+          groupMembers.forEach((member) => {
+            const memberBalances = balancesByAccount.get(member.trustee) || [];
+            relevantBalances.push(...memberBalances);
           });
         } else {
-          trustRelations = await this.dataInterface.getTrustRelations({
-            trustees: [sourceNode.avatar],
-          });
+          relevantBalances = balancesByAccount.get(targetNode.avatar) || [];
         }
 
-        // Edge creation
-        for (const balance of balances) {
-          for (const trustRelation of trustRelations) {
-            if (balance.account == trustRelation.truster) {
-              const sourceKey = sourceNode.avatar;
-              const targetKey = targetNode.avatar;
+        let relevantTrustRelations: TrustRelationRow[] = [];
+        if (sourceNode.isGroup) {
+          // For group sources, get trust relations for all group members
+          const groupMembers = groupMemberRelations.filter(
+            (rel) => rel.truster === sourceNode.avatar,
+          );
+          groupMembers.forEach((member) => {
+            const memberTrusts =
+              trustRelationsByTrustee.get(member.trustee) || [];
+            relevantTrustRelations.push(...memberTrusts);
+          });
+        } else {
+          relevantTrustRelations =
+            trustRelationsByTrustee.get(sourceNode.avatar) || [];
+        }
 
-              let edge = this.graph.edge(sourceKey, targetKey);
-              if (!edge) {
-                edge = this.graph.addEdge(sourceKey, targetKey, {
-                  liquidity: BigInt(0),
-                  lastUpdated: Date.now(),
-                });
-                edgeCount++;
-
-                if (edgeCount % 100 === 0) {
-                  console.log(`Created ${edgeCount} edges so far...`);
-                }
-              }
-
-              this.graph.updateEdgeAttribute(
-                edge,
-                "liquidity",
-                (l) => l + balance.demurragedTotalBalance,
-              );
+        // Calculate total liquidity
+        let totalLiquidity = BigInt(0);
+        for (const balance of relevantBalances) {
+          for (const trust of relevantTrustRelations) {
+            if (balance.account === trust.truster) {
+              totalLiquidity += balance.demurragedTotalBalance;
             }
           }
         }
+
+        // Update edge liquidity if there is any
+        if (totalLiquidity > 0n) {
+          this.graph.updateEdgeAttribute(
+            this.graph.edge(sourceNode.avatar, targetNode.avatar),
+            "liquidity",
+            () => totalLiquidity,
+          );
+        }
       }
     }
 
-    console.log(
-      `Graph initialization complete. Created ${edgeCount} edges total`,
-    );
+    console.log("Graph initialization complete");
     console.timeEnd("Graph initialization");
 
     // Log graph statistics
@@ -470,9 +510,17 @@ class ArbitrageBot {
     console.log("Attempting to executing trade with following parameters:");
     console.log("Amount:", trade.amount.toString());
     console.log("Expected profit:", trade.profit.toString());
+    console.log("Trade: ", trade);
 
     try {
       // Step 1: Execute the initial buy with fixed input
+      //
+      // get the initial buy token balance
+      const initialBuyTokenBalance =
+        await this.dataInterface.getBotERC20Balance(
+          trade.buyNode.erc20tokenAddress,
+        );
+
       console.log("Step 1: Executing initial buy...");
       const buyResult = await this.dataInterface.execSwap(
         trade.buyQuote,
@@ -483,10 +531,19 @@ class ArbitrageBot {
         return false;
       }
 
-      const actualBoughtAmount = await this.dataInterface.getBotERC20Balance(
-        trade.buyQuote.outputAmount.token.address,
-      );
+      // we're retrying here to allow for the new balance to have settled.
+      // The retry function works under the assumption that there is no initial or existing balance.
+      const actualBoughtAmount =
+        await this.dataInterface.getBotERC20BalanceWithRetry(
+          trade.buyNode.erc20tokenAddress,
+        );
       console.log("Actually bought amount:", actualBoughtAmount.toString());
+
+      const actualBoughtAmountDemurragedUnits =
+        await this.dataInterface.convertInflationaryToDemurrage(
+          trade.buyNode.erc20tokenAddress,
+          actualBoughtAmount,
+        );
 
       // Step 2: Transfer to target token
       console.log("Step 2: Transferring to target token...");
@@ -494,8 +551,14 @@ class ArbitrageBot {
       const transferResult = await this.dataInterface.changeCRC({
         from: trade.buyNode,
         to: trade.sellNode,
-        requestedAmount: actualBoughtAmount, // @todo: need to calculate this in
+        requestedAmount: actualBoughtAmountDemurragedUnits,
       });
+
+      // wrap the resulting token (we know this does not need to call the lift address because the token is liquid.)
+      await this.dataInterface.sdkAvatar?.wrapInflationErc20(
+        trade.sellNode.avatar,
+        transferResult,
+      );
 
       if (transferResult == 0n) {
         console.log(
@@ -505,17 +568,21 @@ class ArbitrageBot {
         // Step 3: Execute final sell
         console.log("Step 3: Executing final sell...");
         // Get new sell quote based on actual amount
+        //
+        const actualSellAmount = await this.dataInterface.getBotERC20Balance(
+          trade.sellNode.erc20tokenAddress,
+        );
+
         const finalSellQuote = await this.dataInterface.getTradingQuote({
           tokenAddress: trade.sellQuote.inputAmount.token.address as Address,
           direction: Direction.SELL,
-          amount: transferResult,
+          amount: actualSellAmount,
         });
         if (!finalSellQuote) {
           console.log(
             "Could not get final sell quote, attempting to sell back initial tokens...",
           );
         } else {
-          // Execute final sell
           const sellResult = await this.dataInterface.execSwap(
             finalSellQuote,
             Direction.SELL,
@@ -528,8 +595,8 @@ class ArbitrageBot {
 
       // Clean Up
       console.log("Cleaning up any leftover amounts of the CRC");
-      await this.sellOffLeftoverCRC(trade.buyQuote.outputAmount.token.address);
-      await this.sellOffLeftoverCRC(trade.sellQuote.inputAmount.token.address);
+      await this.sellOffLeftoverCRC(trade.buyNode.erc20tokenAddress);
+      await this.sellOffLeftoverCRC(trade.sellNode.erc20tokenAddress);
       return true;
     } catch (error) {
       console.error("Error during trade execution:", error);
@@ -562,7 +629,7 @@ class ArbitrageBot {
 }
 
 async function main() {
-  const bot = new ArbitrageBot(0.1);
+  const bot = new ArbitrageBot(EXPLORATION_RATE);
   await bot.init();
   await bot.run().catch(console.error);
 }
