@@ -15,6 +15,9 @@ import {
   LatestPriceRow,
   TrustRelationRow,
   Address,
+  DataInterfaceParams,
+  SwapExecutionOptions,
+  TradeExecutionResult,
 } from "./interfaces/index.js";
 
 // Import ethers v6
@@ -93,15 +96,6 @@ const bouncerOrgContract = new Contract(
   bouncerOrgAbi,
   provider,
 );
-
-interface DataInterfaceParams {
-  quoteReferenceAmount: bigint;
-  logActivity: boolean;
-  quotingToken: Address;
-  collateralTokenDecimals: number;
-  tradingToken: Address;
-  tradingTokenDecimals: number;
-}
 
 export class DataInterface {
   private client: pg.Client;
@@ -762,6 +756,7 @@ export class DataInterface {
   public async execSwap(
     swapData: Swap,
     direction: Direction,
+    slippagePercentage: number,
   ): Promise<boolean> {
     console.log("Executing deal");
     const tokenAddressToApprove = swapData.inputAmount.token.address;
@@ -779,8 +774,186 @@ export class DataInterface {
         amountToApprove - currentAllowance,
       );
     // Execute the swap using the prepared swap data.
-    return await this.swapUsingBalancer(swapData, direction);
+    return await this.swapUsingBalancer(
+      swapData,
+      direction,
+      slippagePercentage,
+    );
   }
+
+  /**
+   * @notice Executes a swap with retry logic and custom slippage
+   */
+  public async executeSwapWithRetry(
+    swap: Swap,
+    direction: Direction,
+    options: SwapExecutionOptions,
+  ): Promise<boolean> {
+    for (let i = 0; i < (options.maxRetries ?? 3); i++) {
+      try {
+        const success = await this.execSwap(swap, direction, options.slippage);
+        if (success) return true;
+
+        if (i < (options.maxRetries ?? 3) - 1) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, options.retryDelay ?? 2000),
+          );
+        }
+      } catch (error) {
+        console.error(`Swap attempt ${i + 1} failed:`, error);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @notice Executes a complete trade including buy, transfer and sell steps
+   */
+  public async executeCompleteTrade(params: {
+    buyNode: CirclesNode;
+    sellNode: CirclesNode;
+    buyQuote: Swap;
+    initialAmount: bigint;
+    options: SwapExecutionOptions;
+  }): Promise<TradeExecutionResult> {
+    try {
+      // Execute buy
+      const buySuccess = await this.executeSwapWithRetry(
+        params.buyQuote,
+        Direction.BUY,
+        params.options,
+      );
+
+      if (!buySuccess) {
+        return { success: false, error: "Buy transaction failed" };
+      }
+
+      // Wait for and verify bought amount
+      const boughtAmount = await this.getBotERC20BalanceWithRetry(
+        params.buyNode.erc20tokenAddress,
+        params.options.maxRetries,
+        params.options.retryDelay,
+      );
+
+      if (boughtAmount === 0n) {
+        return { success: false, error: "Failed to receive bought tokens" };
+      }
+
+      // Convert to demurraged units for transfer
+      const demurragedAmount = await this.convertInflationaryToDemurrage(
+        params.buyNode.erc20tokenAddress,
+        boughtAmount,
+      );
+
+      // Execute transfer
+      const transferredAmount = await this.changeCRC({
+        from: params.buyNode,
+        to: params.sellNode,
+        requestedAmount: demurragedAmount,
+      });
+
+      if (transferredAmount === 0n) {
+        return {
+          success: false,
+          boughtAmount,
+          error: "Transfer failed",
+        };
+      }
+
+      // Wrap transferred amount
+      await this.sdkAvatar?.wrapInflationErc20(
+        params.sellNode.avatar,
+        transferredAmount,
+      );
+
+      // Get final balance for sell
+      const sellAmount = await this.getBotERC20BalanceWithRetry(
+        params.sellNode.erc20tokenAddress,
+        params.options.maxRetries,
+        params.options.retryDelay,
+      );
+
+      if (sellAmount === 0n) {
+        return {
+          success: false,
+          boughtAmount,
+          error: "Failed to receive wrapped tokens",
+        };
+      }
+
+      // Execute sell
+      const sellQuote = await this.getTradingQuote({
+        tokenAddress: params.sellNode.erc20tokenAddress,
+        direction: Direction.SELL,
+        amount: sellAmount,
+      });
+
+      if (!sellQuote) {
+        return {
+          success: false,
+          boughtAmount,
+          error: "Failed to get sell quote",
+        };
+      }
+
+      const sellSuccess = await this.executeSwapWithRetry(
+        sellQuote,
+        Direction.SELL,
+        params.options,
+      );
+
+      return {
+        success: sellSuccess,
+        boughtAmount,
+        soldAmount: sellAmount,
+        error: sellSuccess ? undefined : "Sell transaction failed",
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Trade execution failed: ${error}`,
+      };
+    }
+  }
+
+  /**
+   * @notice Attempts to sell any remaining balance of a token
+   */
+  public async cleanupToken(
+    tokenAddress: Address,
+    options: SwapExecutionOptions,
+  ): Promise<boolean> {
+    try {
+      const balance = await this.getBotERC20Balance(tokenAddress);
+
+      if (balance <= 0n) {
+        return true;
+      }
+
+      console.log(
+        `Cleaning up ${balance.toString()} tokens at ${tokenAddress}`,
+      );
+
+      const quote = await this.getTradingQuote({
+        tokenAddress,
+        direction: Direction.SELL,
+        amount: balance,
+      });
+
+      if (!quote) {
+        return false;
+      }
+
+      return await this.executeSwapWithRetry(quote, Direction.SELL, {
+        ...options,
+        slippage: options.slippage * 2, // Double slippage for cleanup
+      });
+    } catch (error) {
+      console.error("Cleanup failed:", error);
+      return false;
+    }
+  }
+
   /**
    * @notice Checks the ERC20 token allowance for a given owner and spender.
    * @param tokenAddress The ERC20 token contract address.
@@ -812,8 +985,10 @@ export class DataInterface {
   private async swapUsingBalancer(
     swap: Swap,
     direction: Direction,
+    slippagePercentage: number,
   ): Promise<boolean> {
     // Get up to date swap result by querying onchain
+
     let updated;
 
     if (direction == Direction.SELL) {
@@ -826,7 +1001,9 @@ export class DataInterface {
 
     const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
     const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
-    const slippage = Slippage.fromPercentage("0.1"); // 0.1%
+    const slippage = Slippage.fromPercentage(
+      slippagePercentage.toString() as `${number}`,
+    );
 
     let buildInput: SwapBuildCallInput;
 

@@ -69,3 +69,25 @@ export interface LatestPriceRow {
   price: bigint;
   timestamp: number;
 }
+
+export interface SwapExecutionOptions {
+  slippage: number;
+  maxRetries?: number;
+  retryDelay?: number;
+}
+
+export interface TradeExecutionResult {
+  success: boolean;
+  boughtAmount?: bigint;
+  soldAmount?: bigint;
+  error?: string;
+}
+
+export interface DataInterfaceParams {
+  quoteReferenceAmount: bigint;
+  logActivity: boolean;
+  quotingToken: Address;
+  collateralTokenDecimals: number;
+  tradingToken: Address;
+  tradingTokenDecimals: number;
+}

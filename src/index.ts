@@ -9,6 +9,7 @@ import {
   Address,
   BalanceRow,
   TrustRelationRow,
+  SwapExecutionOptions,
 } from "./interfaces/index.js";
 import { Swap } from "@balancer/sdk";
 
@@ -487,119 +488,42 @@ class ArbitrageBot {
     return bestTrade;
   }
 
-  async sellOffLeftoverCRC(tokenAddress: Address): Promise<void> {
-    // Check if we have any remaining balance of either intermediate token
-    const remainingBalance =
-      await this.dataInterface.getBotERC20Balance(tokenAddress);
-
-    // If we have any remaining balances, try to sell them back
-    if (remainingBalance > SELLOFF_PRECISION) {
-      console.log("Cleaning up remaining bought token ", tokenAddress);
-      const cleanupQuote = await this.dataInterface.getTradingQuote({
-        tokenAddress: tokenAddress,
-        direction: Direction.SELL,
-        amount: remainingBalance,
-      });
-      if (cleanupQuote) {
-        await this.dataInterface.execSwap(cleanupQuote, Direction.SELL);
-      }
-    }
-  }
-
   async executeTrade(trade: Trade): Promise<boolean> {
-    console.log("Attempting to executing trade with following parameters:");
-    console.log("Amount:", trade.amount.toString());
-    console.log("Expected profit:", trade.profit.toString());
-    console.log("Trade: ", trade);
+    const options: SwapExecutionOptions = {
+      slippage: 0.1,
+      maxRetries: 5,
+      retryDelay: 2000,
+    };
 
     try {
-      // Step 1: Execute the initial buy with fixed input
-      //
-      // get the initial buy token balance
-      const initialBuyTokenBalance =
-        await this.dataInterface.getBotERC20Balance(
-          trade.buyNode.erc20tokenAddress,
-        );
-
-      console.log("Step 1: Executing initial buy...");
-      const buyResult = await this.dataInterface.execSwap(
-        trade.buyQuote,
-        Direction.BUY,
-      );
-      if (!buyResult) {
-        console.log("Initial buy failed, aborting trade");
-        return false;
-      }
-
-      // we're retrying here to allow for the new balance to have settled.
-      // The retry function works under the assumption that there is no initial or existing balance.
-      const actualBoughtAmount =
-        await this.dataInterface.getBotERC20BalanceWithRetry(
-          trade.buyNode.erc20tokenAddress,
-        );
-      console.log("Actually bought amount:", actualBoughtAmount.toString());
-
-      const actualBoughtAmountDemurragedUnits =
-        await this.dataInterface.convertInflationaryToDemurrage(
-          trade.buyNode.erc20tokenAddress,
-          actualBoughtAmount,
-        );
-
-      // Step 2: Transfer to target token
-      console.log("Step 2: Transferring to target token...");
-      // In this step, we'll try and transfer as much as we can using the pathfinder. The transferResult is the amount we managed to transfer (in demurragedUnits)
-      const transferResult = await this.dataInterface.changeCRC({
-        from: trade.buyNode,
-        to: trade.sellNode,
-        requestedAmount: actualBoughtAmountDemurragedUnits,
+      // Execute main trade
+      const result = await this.dataInterface.executeCompleteTrade({
+        buyNode: trade.buyNode,
+        sellNode: trade.sellNode,
+        buyQuote: trade.buyQuote,
+        initialAmount: trade.amount,
+        options,
       });
 
-      // wrap the resulting token (we know this does not need to call the lift address because the token is liquid.)
-      await this.dataInterface.sdkAvatar?.wrapInflationErc20(
-        trade.sellNode.avatar,
-        transferResult,
-      );
-
-      if (transferResult == 0n) {
-        console.log(
-          "Transfer failed, attempting to sell back initial tokens...",
-        );
-      } else {
-        // Step 3: Execute final sell
-        console.log("Step 3: Executing final sell...");
-        // Get new sell quote based on actual amount
-        //
-        const actualSellAmount = await this.dataInterface.getBotERC20Balance(
-          trade.sellNode.erc20tokenAddress,
-        );
-
-        const finalSellQuote = await this.dataInterface.getTradingQuote({
-          tokenAddress: trade.sellQuote.inputAmount.token.address as Address,
-          direction: Direction.SELL,
-          amount: actualSellAmount,
-        });
-        if (!finalSellQuote) {
-          console.log(
-            "Could not get final sell quote, attempting to sell back initial tokens...",
-          );
-        } else {
-          const sellResult = await this.dataInterface.execSwap(
-            finalSellQuote,
-            Direction.SELL,
-          );
-          if (!sellResult) {
-            console.log("Final sell failed");
-          }
-        }
+      // Always attempt cleanup regardless of main trade result
+      try {
+        await Promise.all([
+          this.dataInterface.cleanupToken(trade.buyNode.erc20tokenAddress, {
+            ...options,
+            slippage: 1.0, // Higher slippage for cleanup
+          }),
+          this.dataInterface.cleanupToken(trade.sellNode.erc20tokenAddress, {
+            ...options,
+            slippage: 1.0,
+          }),
+        ]);
+      } catch (cleanupError) {
+        console.error("Cleanup failed:", cleanupError);
       }
 
-      // Clean Up
-      console.log("Cleaning up any leftover amounts of the CRC");
-      await this.sellOffLeftoverCRC(trade.buyNode.erc20tokenAddress);
-      await this.sellOffLeftoverCRC(trade.sellNode.erc20tokenAddress);
-      return true;
+      return result.success;
     } catch (error) {
-      console.error("Error during trade execution:", error);
+      console.error("Trade execution failed:", error);
       return false;
     }
   }
