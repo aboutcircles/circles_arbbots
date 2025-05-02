@@ -57,6 +57,7 @@ const rpcUrl = "https://rpc.gnosischain.com";
 const DemurragedVSInflation = 1;
 const chainId = ChainId.GNOSIS_CHAIN;
 const botPrivateKey = process.env.PRIVATE_KEY!;
+const SELLOFF_PRECISION = BigInt(1e12);
 
 // Constant addresses
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
@@ -759,20 +760,7 @@ export class DataInterface {
     slippagePercentage: number,
   ): Promise<boolean> {
     console.log("Executing deal");
-    const tokenAddressToApprove = swapData.inputAmount.token.address;
-    const amountToApprove = swapData.inputAmount.amount;
-    // If the token has not been approved yet, set the maximum allowance.
-    const currentAllowance = await this.checkAllowance(
-      tokenAddressToApprove,
-      wallet.address,
-      balancerVaultAddress,
-    );
-    if (currentAllowance < amountToApprove)
-      await this.approveTokens(
-        tokenAddressToApprove,
-        balancerVaultAddress,
-        amountToApprove - currentAllowance,
-      );
+
     // Execute the swap using the prepared swap data.
     return await this.swapUsingBalancer(
       swapData,
@@ -1017,6 +1005,26 @@ export class DataInterface {
     };
 
     const callData = swap.buildCall(buildInput) as SwapBuildOutputExactOut;
+
+    // If the token has not been approved yet, set the maximum allowance.
+    const tokenAddressToApprove = swap.inputAmount.token.address;
+    const currentAllowance = await this.checkAllowance(
+      tokenAddressToApprove,
+      wallet.address,
+      balancerVaultAddress,
+    );
+    let amountToApprove = callData?.maxAmountIn?.amount || BigInt(0);
+    if(amountToApprove < swap.inputAmount.amount) {
+      amountToApprove = swap.inputAmount.amount;
+    } else {
+      amountToApprove = amountToApprove + SELLOFF_PRECISION; // @dev notice add a slight overhead
+    }
+    if (currentAllowance < amountToApprove)
+      await this.approveTokens(
+        tokenAddressToApprove,
+        balancerVaultAddress,
+        amountToApprove
+      );
 
     return await wallet
       .sendTransaction({ to: callData.to, data: callData.callData })
