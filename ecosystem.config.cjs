@@ -2,10 +2,10 @@ module.exports = {
   apps: [
     {
       name: "arbbot_generic",
-      script: "dist/index.js",
+      script: "dist/generic/index.js",
       instances: 1,
       exec_mode: "fork",
-      node_args: "--env-file .env.generic",
+      node_args: "--env-file env_files/.env.generic",
     },
   ],
 };
