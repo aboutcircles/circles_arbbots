@@ -14,9 +14,9 @@ import {
 import { Swap } from "@balancer/sdk";
 
 // global variables
-const LOG_ACTIVITY = false;
+const LOG_ACTIVITY = true;
 const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
-const EXPLORATION_RATE = 0.1;
+const EXPLORATION_RATE = 0.8;
 const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
 const PROFIT_THRESHOLD = 100000000000n; // profit threshold, should be denominated in the colalteral curreny
 // const GROUPS_CAP_LIQUIDITY = BigInt(500 * 1e18);
@@ -29,7 +29,7 @@ const TRADING_TOKEN_DECIMALS = 18;
 const QUOTE_TOKEN =
   "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d".toLowerCase() as Address; // xDAI
 const QUOTE_TOKEN_DEMICALS = 18;
-const NODE_LIMIT = 5;
+const NODE_LIMIT = undefined;
 
 class ArbitrageBot {
   private graph: DirectedGraph;
@@ -530,6 +530,7 @@ class ArbitrageBot {
   private async resyncGraph() {
     // @dev: for now we just reinitialise the Graph but down the line
     // should find ways to not throw away all the cached info
+    this.graph = new DirectedGraph();
     await this.initializeGraph();
   }
 
@@ -539,11 +540,11 @@ class ArbitrageBot {
     await this.initializeGraph();
 
     while (true) {
-      const currentTime = Date.now();
-      if (currentTime - lastResync > RESYNC_INTERVAL) {
-        await this.resyncGraph();
-        lastResync = currentTime;
-      }
+      // const currentTime = Date.now();
+      // if (currentTime - lastResync > RESYNC_INTERVAL) {
+      //   await this.resyncGraph();
+      //   lastResync = currentTime;
+      // }
 
       await this.executeArbitrageRound();
       await new Promise((resolve) => setTimeout(resolve, 1000)); // Add delay between rounds
