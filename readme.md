@@ -1,52 +1,83 @@
 # ArbBot
 
-```
+A specialized arbitrage bot for the Circles ecosystem with two distinct implementations:
+
+## Generic Arbitrage Bot
+
+The generic implementation uses a graph-based approach to find and execute profitable trading opportunities:
+
 1. INITIALIZATION
-   ├─ Load environment variables (RPC_URL, ARBBOT_ADDRESS, PRIVATE_KEY, etc.)
-   ├─ Set up WebSocket and ethers provider
-   ├─ Initialize wallet using the private key
-   ├─ Connect to the PostgreSQL database
-   ├─ Initialize Circles SDK and API objects (CirclesData, CirclesRpc)
-   ├─ Create Balancer API instance for on-chain swap queries
-   ├─ Initialize necessary smart contract instances (e.g., hubV2, ERC20 token contracts)
-   └─ Set up the bot’s internal state (addresses, group token, members cache, etc.)
+   ├─ Initialize data interface and graph structure
+   ├─ Connect to required APIs (Balancer, Circles)
+   └─ Set up configuration parameters
 
-2. MAIN LOOP (Runs indefinitely)
-   ├─ UPDATE GROUP MEMBERS CACHE
-   │    ├─ Query the PostgreSQL database for new group members (since the last update)
-   │    └─ Append any new members to the local cache and update the timestamp
-   │
-   ├─ FOR EACH GROUP MEMBER IN CACHE:
-   │    ├─ UPDATE MEMBER DATA
-   │    │    ├─ If the member's token address is not set, call the contract to fetch it
-   │    │    └─ Retrieve the latest token price (using Balancer API)
-   │    │         └─ Update the member's last price and timestamp
-   │    │
-   │    ├─ EVALUATE ARBITRAGE DEAL
-   │    │    ├─ Determine the swap direction (group token to member token or vice versa)
-   │    │    ├─ Compare the fetched price to a reference value (e.g., 1e18 units)
-   │    │    ├─ If the price difference exceeds a defined threshold (EPSILON):
-   │    │    │       └─ Mark the deal as potentially profitable
-   │    │    └─ Otherwise, skip to the next member
-   │    │
-   │    ├─ ENSURE REQUIRED TOKENS ARE AVAILABLE
-   │    │    ├─ Check if the bot has enough tokens to execute the swap
-   │    │    ├─ If not enough:
-   │    │    │       ├─ Attempt to mint new tokens from members’ balances
-   │    │    │       ├─ Convert tokens (wrap/unwrap) as needed
-   │    │    │       └─ If it is still not enough, skip to the next member
-   │    │    └─ Confirm that token allowances are set (approve tokens if necessary)
-   │    │
-   │    └─ EXECUTE SWAP (if deal is profitable and tokens are sufficient)
-   │         ├─ Build the swap call using Balancer API (including slippage and deadline settings)
-   │         ├─ Send the swap transaction
-   │         └─ Log the transaction details (e.g., tx hash)
-   │
-   └─ (OPTIONAL @todo) Perform housekeeping tasks:
-         ├─ Clear any residual “dust” tokens
-         └─ Optionally introduce a short delay before the next iteration
+2. GRAPH CONSTRUCTION
+   ├─ Load initial nodes from database
+   ├─ Fetch group members and trust relationships
+   ├─ Calculate initial price estimates
+   └─ Build complete graph with liquidity edges
 
-3. ERROR HANDLING
-   ├─ Catch and log errors during database queries, on-chain calls, or transactions
-   └─ If a fatal error occurs in the main function, exit with a non-zero code (for restart by a process manager)
-```
+3. DEAL FINDING & EXECUTION
+   ├─ SELECT EDGE
+   │    ├─ Random exploration (with probability EXPLORATION_RATE)
+   │    └─ Best score selection based on:
+   │         score = (targetPrice - sourcePrice) × edgeLiquidity
+   │
+   ├─ UPDATE VALUES
+   │    ├─ Refresh spot prices for source and target nodes
+   │    └─ Update edge liquidity through trust relationships
+   │
+   ├─ CALCULATE OPTIMAL TRADE
+   │    ├─ Start with minimum extractable amount
+   │    ├─ Double amount iteratively while profitable
+   │    └─ Select best profit/amount combination
+   │
+   └─ EXECUTE TRADE
+        ├─ Verify profit > threshold
+        ├─ Build Balancer swap parameters
+        └─ Execute transaction
+
+## Group-Specific Arbitrage Bot
+
+The group-focused implementation targets arbitrage between group tokens and member tokens:
+
+1. INITIALIZATION
+   ├─ Load environment variables and contracts
+   ├─ Initialize Circles SDK and APIs
+   └─ Set up database connections
+
+2. DEAL FINDING & EXECUTION
+   ├─ FOR EACH GROUP MEMBER:
+   │    ├─ Update token prices via Balancer quotes
+   │    │
+   │    ├─ EVALUATE BOTH DIRECTIONS:
+   │    │    ├─ Group token → Member token
+   │    │    └─ Member token → Group token
+   │    │
+   │    ├─ OPTIMIZE TRADE SIZE:
+   │    │    ├─ Start with MIN_EXTRACTABLE_AMOUNT
+   │    │    ├─ Double amount while:
+   │    │    │    ├─ Price remains favorable
+   │    │    │    ├─ Required tokens are available
+   │    │    │    └─ Profit increases
+   │    │    └─ Select most profitable amount
+   │    │
+   │    └─ CHECK PROFITABILITY:
+   │         outputAmount - inputAmount > EPSILON
+   │
+   ├─ ENSURE LIQUIDITY
+   │    ├─ Check current token balances (ERC20 + ERC1155)
+   │    ├─ Calculate required additional tokens
+   │    ├─ Pull tokens through pathfinder if needed
+   │    └─ Convert tokens (wrap/unwrap)
+   │
+   └─ EXECUTE TRADE
+        ├─ Set token approvals if needed
+        ├─ Build Balancer swap parameters
+        └─ Execute transaction
+
+Both implementations feature:
+- Configurable profitability thresholds
+- Token balance management
+- Error handling and logging
+- Automatic token approvals
