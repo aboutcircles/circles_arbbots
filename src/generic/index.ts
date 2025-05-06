@@ -551,12 +551,14 @@ class ArbitrageBot {
 }
 
 async function main() {
-  const bot = new ArbitrageBot(EXPLORATION_RATE);
-  await bot.init();
-  await bot.run().catch(console.error);
+  try {
+    const bot = new ArbitrageBot(EXPLORATION_RATE);
+    await bot.init();
+    await bot.run();
+  } catch (error) {
+    console.error("Critical error in bot execution:", error);
+    process.exit(1); // This will trigger PM2 restart
+  }
 }
 
-main().catch((error) => {
-  console.error("Failed to start bot:", error);
-  process.exit(1);
-});
+main();
