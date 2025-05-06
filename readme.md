@@ -1,3 +1,12 @@
+# ArbBot
+
+A specialized arbitrage bot for the Circles ecosystem with two distinct implementations:
+
+## Generic Arbitrage Bot
+
+The generic implementation uses a graph-based approach to find and execute profitable trading opportunities:
+
+```text
 1. INITIALIZATION
    ├─ Initialize data interface and graph structure
    ├─ Connect to required APIs (Balancer, Circles)
