@@ -1,11 +1,3 @@
-# ArbBot
-
-A specialized arbitrage bot for the Circles ecosystem with two distinct implementations:
-
-## Generic Arbitrage Bot
-
-The generic implementation uses a graph-based approach to find and execute profitable trading opportunities:
-
 1. INITIALIZATION
    ├─ Initialize data interface and graph structure
    ├─ Connect to required APIs (Balancer, Circles)
@@ -36,11 +28,13 @@ The generic implementation uses a graph-based approach to find and execute profi
         ├─ Verify profit > threshold
         ├─ Build Balancer swap parameters
         └─ Execute transaction
+```
 
 ## Group-Specific Arbitrage Bot
 
 The group-focused implementation targets arbitrage between group tokens and member tokens:
 
+```text
 1. INITIALIZATION
    ├─ Load environment variables and contracts
    ├─ Initialize Circles SDK and APIs
@@ -75,9 +69,4 @@ The group-focused implementation targets arbitrage between group tokens and memb
         ├─ Set token approvals if needed
         ├─ Build Balancer swap parameters
         └─ Execute transaction
-
-Both implementations feature:
-- Configurable profitability thresholds
-- Token balance management
-- Error handling and logging
-- Automatic token approvals
+```
