@@ -95,7 +95,7 @@ const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken"
 const bouncerOrgContract = new Contract(
   crcBouncerOrgAddress,
   bouncerOrgAbi,
-  provider,
+  wallet
 );
 
 export class DataInterface {
@@ -306,7 +306,7 @@ export class DataInterface {
       from: wallet.address as Address,
       to: toAddress,
       toTokens: toTokens,
-    });
+    }); // @notice this value needs to be checked, it often returns zero
 
     let amountToTransfer =
       params.requestedAmount > maxTransferableAmount
@@ -815,7 +815,7 @@ export class DataInterface {
       if (!buySuccess) {
         return { success: false, error: "Buy transaction failed" };
       }
-
+    
       // Wait for and verify bought amount
       const boughtAmount = await this.getBotERC20BalanceWithRetry(
         params.buyNode.erc20tokenAddress,
