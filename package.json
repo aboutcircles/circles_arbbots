@@ -5,9 +5,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
-    "start": "npm run build && pm2 start ecosystem.config.cjs",
-    "start:nodaemon": "npm run build & pm2 start ecosystem.config.cjs --no-daemon",
-    "start:monitor": "tsc && pm2 start ecosystem.monitor.config.cjs"
+    "start": "pm2 start ecosystem.config.cjs",
+    "start:nodaemon": "pm2 start ecosystem.config.cjs --no-daemon",
+    "start:monitor": "pm2 start ecosystem.monitor.config.cjs"
   },
   "keywords": [],
   "author": "",
