@@ -95,7 +95,7 @@ const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken"
 const bouncerOrgContract = new Contract(
   crcBouncerOrgAddress,
   bouncerOrgAbi,
-  provider,
+  wallet,
 );
 
 export class DataInterface {
@@ -306,7 +306,7 @@ export class DataInterface {
       from: wallet.address as Address,
       to: toAddress,
       toTokens: toTokens,
-    });
+    }); // @notice this value needs to be checked, it often returns zero
 
     let amountToTransfer =
       params.requestedAmount > maxTransferableAmount
@@ -1014,7 +1014,7 @@ export class DataInterface {
       balancerVaultAddress,
     );
     let amountToApprove = callData?.maxAmountIn?.amount || BigInt(0);
-    if(amountToApprove < swap.inputAmount.amount) {
+    if (amountToApprove < swap.inputAmount.amount) {
       amountToApprove = swap.inputAmount.amount;
     } else {
       amountToApprove = amountToApprove + SELLOFF_PRECISION; // @dev notice add a slight overhead
@@ -1023,7 +1023,7 @@ export class DataInterface {
       await this.approveTokens(
         tokenAddressToApprove,
         balancerVaultAddress,
-        amountToApprove
+        amountToApprove,
       );
 
     return await wallet
