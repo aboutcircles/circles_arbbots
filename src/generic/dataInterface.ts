@@ -331,7 +331,7 @@ export class DataInterface {
           ? maxTransferableAmount
           : params.requestedAmount;
 
-      amountToTransfer /=
+      amountToTransfer =
         (amountToTransfer / BigInt(10 ** 12)) * BigInt(10 ** 12);
 
       console.log(
@@ -360,33 +360,17 @@ export class DataInterface {
         console.log("Transfer returned false or failed");
         return 0n;
       }
-    }
-    const maxTransferableAmount = await this.getMaxTransferableAmount({
-      from: wallet.address as Address,
-      to: toAddress,
-      toTokens: toTokens,
-    }); // @notice this value needs to be checked, it often returns zero
 
-    let amountToTransfer =
-      params.requestedAmount > maxTransferableAmount
-        ? maxTransferableAmount
-        : params.requestedAmount;
-
-    const transferSuccessful = await this.sdkAvatar!.transfer(
-      toAddress,
-      amountToTransfer,
-      undefined,
-      undefined,
-      true,
-      undefined,
-      toTokens,
-    );
-
-    if (!transferSuccessful) {
+      console.log("Transfer completed successfully");
+      return amountToTransfer;
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        console.error("Error in changeCRC:", error.message);
+      } else {
+        console.error("Unknown error in changeCRC:", error);
+      }
       return 0n;
     }
-
-    return amountToTransfer;
   }
 
   public async getMaxTransferableAmount(params: {
@@ -405,12 +389,14 @@ export class DataInterface {
           Sink: params.to,
           FromTokens: params.fromTokens,
           ToTokens: params.toTokens,
-          WithWrapped: true,
+          WithWrap: true,
           TargetFlow: "99999999999999999999999999999999999",
         },
       ],
     };
 
+    // const body = JSON.stringify(findPathPayload);
+    // console.log("pathfinder query body: ", body);
     const response = await fetch("https://rpc.aboutcircles.com/", {
       method: "POST",
       headers: {
@@ -920,6 +906,11 @@ export class DataInterface {
         to: params.sellNode,
         requestedAmount: demurragedAmount,
       });
+
+      console.log(
+        "Transferred amount from buy into sell tokens: ",
+        transferredAmount,
+      );
 
       if (transferredAmount === 0n) {
         return {

@@ -530,7 +530,7 @@ class ArbitrageBot {
   async executeTrade(trade: Trade): Promise<boolean> {
     const options: SwapExecutionOptions = {
       slippage: 0.1,
-      maxRetries: 5,
+      maxRetries: 10,
       retryDelay: 2000,
     };
 
