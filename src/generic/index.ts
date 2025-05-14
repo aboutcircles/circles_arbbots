@@ -227,22 +227,64 @@ class ArbitrageBot {
     return delta <= 0 ? 0n : delta * liquidity;
   }
 
-  private selectNextEdge(): string {
-    if (Math.random() < this.explorationRate) {
-      // @todo: improve this
-      // randomly select an edge uniformly
-      const edges = this.graph.edges();
-      const randomIndex = Math.floor(Math.random() * edges.length);
-      return edges[randomIndex];
-    } else {
-      // Select highest scoring edge
-      return this.graph.reduceEdges(
-        (best, current) =>
-          this.scoreEdge(current) >= this.scoreEdge(best) ? current : best,
-        "",
-      );
-    }
+  private calculateNorm(scores: bigint[]): bigint {
+    // Add small constant to each score and compute sum of squares
+    const EPSILON = 1000000n; // Small constant to avoid zero vector
+    return scores.reduce((sum, score) => {
+      const adjustedScore = score + EPSILON;
+      return sum + adjustedScore * adjustedScore;
+    }, 0n);
   }
+
+  private sampleFromDistribution(probabilities: number[]): number {
+    const r = Math.random();
+    let sum = 0;
+    for (let i = 0; i < probabilities.length; i++) {
+      sum += probabilities[i];
+      if (r <= sum) return i;
+    }
+    return probabilities.length - 1; // Fallback
+  }
+
+  private selectNextEdge(): string {
+    const edges = this.graph.edges();
+    const scores = edges.map((edge) => this.scoreEdge(edge));
+
+    const norm = this.calculateNorm(scores);
+    if (norm === 0n) {
+      // Fallback to uniform sampling if all scores are 0
+      return edges[Math.floor(Math.random() * edges.length)];
+    }
+
+    // Calculate probabilities proportional to squared scores
+    const EPSILON = 1000000n;
+    const probabilities = scores.map((score) => {
+      const adjustedScore = score + EPSILON;
+      return (
+        Number((adjustedScore * adjustedScore * 1000000n) / norm) / 1000000
+      );
+    });
+
+    const selectedIndex = this.sampleFromDistribution(probabilities);
+    return edges[selectedIndex];
+  }
+
+  // private selectNextEdge(): string {
+  //   if (Math.random() < this.explorationRate) {
+  //     // @todo: improve this
+  //     // randomly select an edge uniformly
+  //     const edges = this.graph.edges();
+  //     const randomIndex = Math.floor(Math.random() * edges.length);
+  //     return edges[randomIndex];
+  //   } else {
+  //     // Select highest scoring edge
+  //     return this.graph.reduceEdges(
+  //       (best, current) =>
+  //         this.scoreEdge(current) >= this.scoreEdge(best) ? current : best,
+  //       "",
+  //     );
+  //   }
+  // }
 
   // Helper method for destructuring edge information since TypeScript
   // doesn't easily infer types from array destructuring
@@ -504,16 +546,17 @@ class ArbitrageBot {
 
       // Always attempt cleanup regardless of main trade result
       try {
-        await Promise.all([
-          this.dataInterface.cleanupToken(trade.buyNode.erc20tokenAddress, {
-            ...options,
-            slippage: 1.0, // Higher slippage for cleanup
-          }),
-          this.dataInterface.cleanupToken(trade.sellNode.erc20tokenAddress, {
-            ...options,
-            slippage: 1.0,
-          }),
-        ]);
+        // await Promise.all([
+        //   this.dataInterface.cleanupToken(trade.buyNode.erc20tokenAddress, {
+        //     ...options,
+        //     slippage: 1.0, // Higher slippage for cleanup
+        //   }),
+        //   this.dataInterface.cleanupToken(trade.sellNode.erc20tokenAddress, {
+        //     ...options,
+        //     slippage: 1.0,
+        //   }),
+        // ]);
+        console.log("Skipping cleanup");
       } catch (cleanupError) {
         console.error("Cleanup failed:", cleanupError);
       }
