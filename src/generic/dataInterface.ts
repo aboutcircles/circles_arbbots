@@ -291,14 +291,73 @@ export class DataInterface {
     to: CirclesNode;
     requestedAmount: bigint;
   }): Promise<bigint> {
-    const toAddress = params.to.isGroup
-      ? params.to.mintHandler!
-      : crcBouncerOrgAddress;
-    const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
+    try {
+      const toAddress = params.to.isGroup
+        ? params.to.mintHandler!
+        : crcBouncerOrgAddress;
+      const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
 
-    if (!params.to.isGroup) {
-      const trustUpdated = await this.updateBouncerOrgTrust(params.to.avatar);
-      if (!trustUpdated) {
+      if (!params.to.isGroup) {
+        console.log("Forcing trust for ", params.to.avatar);
+        const trustUpdated = await this.updateBouncerOrgTrust(params.to.avatar);
+        if (!trustUpdated) {
+          console.log("Failed to update trust relationships");
+          return 0n;
+        }
+      }
+
+      const maxTransferableAmount = await this.getMaxTransferableAmount({
+        from: wallet.address as Address,
+        to: toAddress,
+        toTokens: toTokens,
+      });
+
+      console.log("Validating max transferrable amount:");
+      console.log(
+        "getMaxTransferableAmount arguments: from",
+        wallet.address,
+        "to:",
+        toAddress,
+        "toTokens:",
+        toTokens,
+      );
+      console.log(
+        "getMaxTransferableAmount returned:",
+        maxTransferableAmount.toString(),
+      );
+
+      let amountToTransfer =
+        params.requestedAmount > maxTransferableAmount
+          ? maxTransferableAmount
+          : params.requestedAmount;
+
+      amountToTransfer /=
+        (amountToTransfer / BigInt(10 ** 12)) * BigInt(10 ** 12);
+
+      console.log(
+        "Attempting to transfer amount:",
+        amountToTransfer.toString(),
+      );
+
+      const transferResult = await this.sdkAvatar!.transfer(
+        toAddress,
+        amountToTransfer,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        toTokens,
+      ).catch((error: unknown) => {
+        if (error instanceof Error) {
+          console.error("Transfer failed with error:", error.message);
+        } else {
+          console.error("Transfer failed with unknown error type:", error);
+        }
+        return false;
+      });
+
+      if (!transferResult) {
+        console.log("Transfer returned false or failed");
         return 0n;
       }
     }
@@ -504,16 +563,38 @@ export class DataInterface {
     tokenAddresses: string[],
   ): Promise<Map<string, LatestPriceRow | null>> {
     try {
-      // const query = `
-      //   SELECT
-      //     "tokenAddress",
-      //     "timestamp",
-      //     "priceInEth"
-      //   FROM "V_BPoolPrices"
-      //   WHERE "tokenAddress" = ANY($1)
-      // `;
+      // Query to get the latest entry for each token where inputtoken is the quote reference token
+      const query = `
+        WITH LatestQuotes AS (
+          SELECT
+            outputtoken,
+            inputamountraw,
+            outputamountraw,
+            timestamp,
+            ROW_NUMBER() OVER (
+              PARTITION BY outputtoken
+              ORDER BY timestamp DESC
+            ) as rn
+          FROM quotes
+          WHERE
+            outputtoken = ANY($1)
+            AND inputtoken = $2
+            AND inputamountraw IS NOT NULL
+        )
+        SELECT
+          outputtoken as "tokenAddress",
+          inputamountraw,
+          outputamountraw,
+          timestamp
+        FROM LatestQuotes
+        WHERE rn = 1
+      `;
 
-      // const result = await this.client.query(query, [tokenAddresses]);
+      // Execute query with tokenAddresses and quoting token address
+      const result = await this.loggerClient.query(query, [
+        tokenAddresses,
+        this.quotingToken.address,
+      ]);
 
       const priceMap = new Map<string, LatestPriceRow | null>();
 
@@ -523,12 +604,12 @@ export class DataInterface {
       });
 
       // Update prices where found
-      // result.rows.forEach((row) => {
-      //   priceMap.set(row.tokenAddress, {
-      //     price: BigInt(row.priceInEth),
-      //     timestamp: Number(row.timestamp),
-      //   });
-      // });
+      result.rows.forEach((row) => {
+        priceMap.set(row.tokenAddress, {
+          price: BigInt(row.inputamountraw),
+          timestamp: Number(row.timestamp),
+        });
+      });
 
       return priceMap;
     } catch (error) {
