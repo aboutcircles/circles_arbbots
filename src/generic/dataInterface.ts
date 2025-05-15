@@ -896,7 +896,7 @@ export class DataInterface {
             Sink: toAddress,
             FromTokens: [params.from.avatar],
             ToTokens: toTokens,
-            WithWrap: true,
+            WithWrap: false,
             TargetFlow: params.requestedAmount.toString(),
           },
         ],
