@@ -31,7 +31,6 @@ import {
   hubV2Abi,
   erc20LiftAbi,
   inflationaryTokenAbi,
-  bouncerOrgAbi,
   middlewareAbi,
 } from "./abi/index.js";
 
@@ -96,9 +95,9 @@ const hubV2Contract = new Contract(
 
 const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
 
-const bouncerOrgContract = new Contract(
-  crcBouncerOrgAddress,
-  bouncerOrgAbi,
+const middlewareContract = new Contract(
+  middlewareAddress,
+  middlewareAbi,
   wallet,
 );
 
@@ -303,7 +302,7 @@ export class DataInterface {
 
       if (!params.to.isGroup) {
         console.log("Forcing trust for ", params.to.avatar);
-        const trustUpdated = await this.updateBouncerOrgTrust(params.to.avatar);
+        const trustUpdated = await this.updateMiddlewareTrust(params.to.avatar);
         if (!trustUpdated) {
           console.log("Failed to update trust relationships");
           return 0n;
@@ -452,24 +451,23 @@ export class DataInterface {
    * @param toTokens address to establish trust with
    * @return {Promise<boolean>} Returns true if rust relationships is successfully established
    */
-  private async updateBouncerOrgTrust(tokenAvatar: string): Promise<boolean> {
+  private async updateMiddlewareTrust(tokenAvatar: string): Promise<boolean> {
     try {
       // Check if trust already exists
       const isTrusted = await hubV2Contract.isTrusted(
-        crcBouncerOrgAddress,
+        middlewareAddress,
         tokenAvatar,
       );
 
       if (!isTrusted) {
-        // Force trust using the bouncer org contract
-        const tx = await bouncerOrgContract.forceTrust(tokenAvatar);
+        const tx = await middlewareContract.forceTrust(tokenAvatar);
         await tx.wait();
-        console.log(`Bouncer Org forceTrusted: ${tokenAvatar}`);
+        console.log(`Middleware forceTrusted: ${tokenAvatar}`);
       }
 
       return true;
     } catch (error) {
-      console.error("Error updating bouncer org trust:", error);
+      console.error("Error updating middleware trust:", error);
       return false;
     }
   }
@@ -872,18 +870,18 @@ export class DataInterface {
   }): Promise<bigint | null> {
     try {
       // we assume that the max flow from the deal findingis still uptodate
-      // so we don't actually update this.
+      // so we don't actually update this here.
 
       const toAddress = params.to.isGroup
         ? params.to.mintHandler!
-        : crcBouncerOrgAddress;
+        : middlewareAddress;
       const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
 
       if (!params.to.isGroup) {
         console.log("Forcing trust for ", params.to.avatar);
-        const trustUpdated = await this.updateBouncerOrgTrust(params.to.avatar);
+        const trustUpdated = await this.updateMiddlewareTrust(params.to.avatar);
         if (!trustUpdated) {
-          console.log("Failed to update bouncer org trust relationships");
+          console.log("Failed to update middleware trust relationships");
           return null;
         }
       }
@@ -894,20 +892,20 @@ export class DataInterface {
         maxHolder,
         toAddress,
         params.requestedAmount,
-        true,
+        false,
         [params.from.avatar],
-        [params.to.avatar],
+        [toTokens],
       );
 
       const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
         middlewareAddress,
-        crcBouncerOrgAddress,
+        middlewareAddress,
         buildPath.maxFlow,
         buildPath.transfers.map((transfer: any) => {
           return {
             from:
               transfer.from == maxHolder ? middlewareAddress : transfer.from,
-            to: transfer.to == maxHolder ? middlewareAddress : transfer.to,
+            to: transfer.to,
             tokenOwner: transfer.tokenOwner,
             value: transfer.value,
           };
