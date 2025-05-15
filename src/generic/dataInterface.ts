@@ -869,9 +869,6 @@ export class DataInterface {
     requestedAmount: bigint;
   }): Promise<bigint | null> {
     try {
-      // we assume that the max flow from the deal findingis still uptodate
-      // so we don't actually update this here.
-
       const toAddress = params.to.isGroup
         ? params.to.mintHandler!
         : middlewareAddress;
@@ -888,14 +885,39 @@ export class DataInterface {
 
       const maxHolder = await this.getMaxHolder(params.from.avatar);
 
-      const buildPath = await this.sdk.v2Pathfinder.getPath(
-        maxHolder,
-        toAddress,
-        params.requestedAmount,
-        false,
-        [params.from.avatar],
-        [toTokens],
-      );
+      // Replace SDK call with direct RPC call
+      const findPathPayload = {
+        jsonrpc: "2.0",
+        id: 0,
+        method: "circlesV2_findPath",
+        params: [
+          {
+            Source: maxHolder,
+            Sink: toAddress,
+            FromTokens: [params.from.avatar],
+            ToTokens: toTokens,
+            WithWrap: true,
+            TargetFlow: params.requestedAmount.toString(),
+          },
+        ],
+      };
+
+      const response = await fetch("https://rpc.aboutcircles.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(findPathPayload),
+      });
+
+      const data = await response.json();
+
+      if (!data.result) {
+        console.log("No path found");
+        return null;
+      }
+
+      const buildPath = data.result;
 
       const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
         middlewareAddress,
