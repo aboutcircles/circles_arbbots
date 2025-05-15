@@ -283,3 +283,263 @@ export const baseGroupAbi = [
     type: "function",
   },
 ];
+
+export const middlewareAbi = [
+  {
+    type: "function",
+    name: "executeSequentialBatchSwaps",
+    inputs: [
+      {
+        name: "ethToSpend",
+        type: "uint256",
+        internalType: "uint256",
+      },
+      {
+        name: "crcToBuy",
+        type: "address",
+        internalType: "address",
+      },
+      {
+        name: "crcToSell",
+        type: "address",
+        internalType: "address",
+      },
+      {
+        name: "buySwap",
+        type: "tuple",
+        components: [
+          {
+            name: "swapKind",
+            type: "uint8",
+            internalType: "enum IBalancerVault.SwapKind",
+          },
+          {
+            name: "swaps",
+            type: "tuple[]",
+            components: [
+              {
+                name: "poolId",
+                type: "bytes32",
+                internalType: "bytes32",
+              },
+              {
+                name: "assetInIndex",
+                type: "uint256",
+                internalType: "uint256",
+              },
+              {
+                name: "assetOutIndex",
+                type: "uint256",
+                internalType: "uint256",
+              },
+              {
+                name: "amount",
+                type: "uint256",
+                internalType: "uint256",
+              },
+              {
+                name: "userData",
+                type: "bytes",
+                internalType: "bytes",
+              },
+            ],
+            internalType: "struct IBalancerVault.BatchSwapStep[]",
+          },
+          {
+            name: "assets",
+            type: "address[]",
+            internalType: "address[]",
+          },
+          {
+            name: "funds",
+            type: "tuple",
+            components: [
+              {
+                name: "sender",
+                type: "address",
+                internalType: "address",
+              },
+              {
+                name: "fromInternalBalance",
+                type: "bool",
+                internalType: "bool",
+              },
+              {
+                name: "recipient",
+                type: "address",
+                internalType: "address payable",
+              },
+              {
+                name: "toInternalBalance",
+                type: "bool",
+                internalType: "bool",
+              },
+            ],
+            internalType: "struct IBalancerVault.FundManagement",
+          },
+          {
+            name: "limits",
+            type: "int256[]",
+            internalType: "int256[]",
+          },
+          {
+            name: "deadline",
+            type: "uint256",
+            internalType: "uint256",
+          },
+        ],
+        internalType: "struct CirclesArbbotMiddleware.BatchSwap",
+      },
+      {
+        name: "sellSwap",
+        type: "tuple",
+        components: [
+          {
+            name: "swapKind",
+            type: "uint8",
+            internalType: "enum IBalancerVault.SwapKind",
+          },
+          {
+            name: "swaps",
+            type: "tuple[]",
+            components: [
+              {
+                name: "poolId",
+                type: "bytes32",
+                internalType: "bytes32",
+              },
+              {
+                name: "assetInIndex",
+                type: "uint256",
+                internalType: "uint256",
+              },
+              {
+                name: "assetOutIndex",
+                type: "uint256",
+                internalType: "uint256",
+              },
+              {
+                name: "amount",
+                type: "uint256",
+                internalType: "uint256",
+              },
+              {
+                name: "userData",
+                type: "bytes",
+                internalType: "bytes",
+              },
+            ],
+            internalType: "struct IBalancerVault.BatchSwapStep[]",
+          },
+          {
+            name: "assets",
+            type: "address[]",
+            internalType: "address[]",
+          },
+          {
+            name: "funds",
+            type: "tuple",
+            components: [
+              {
+                name: "sender",
+                type: "address",
+                internalType: "address",
+              },
+              {
+                name: "fromInternalBalance",
+                type: "bool",
+                internalType: "bool",
+              },
+              {
+                name: "recipient",
+                type: "address",
+                internalType: "address payable",
+              },
+              {
+                name: "toInternalBalance",
+                type: "bool",
+                internalType: "bool",
+              },
+            ],
+            internalType: "struct IBalancerVault.FundManagement",
+          },
+          {
+            name: "limits",
+            type: "int256[]",
+            internalType: "int256[]",
+          },
+          {
+            name: "deadline",
+            type: "uint256",
+            internalType: "uint256",
+          },
+        ],
+        internalType: "struct CirclesArbbotMiddleware.BatchSwap",
+      },
+      {
+        name: "pathFlow",
+        type: "tuple",
+        components: [
+          {
+            name: "flowVertices",
+            type: "address[]",
+            internalType: "address[]",
+          },
+          {
+            name: "flow",
+            type: "tuple[]",
+            components: [
+              {
+                name: "streamSinkId",
+                type: "uint16",
+                internalType: "uint16",
+              },
+              {
+                name: "amount",
+                type: "uint192",
+                internalType: "uint192",
+              },
+            ],
+            internalType: "struct FlowEdge[]",
+          },
+          {
+            name: "streams",
+            type: "tuple[]",
+            components: [
+              {
+                name: "sourceCoordinate",
+                type: "uint16",
+                internalType: "uint16",
+              },
+              {
+                name: "flowEdgeIds",
+                type: "uint16[]",
+                internalType: "uint16[]",
+              },
+              {
+                name: "data",
+                type: "bytes",
+                internalType: "bytes",
+              },
+            ],
+            internalType: "struct Stream[]",
+          },
+          {
+            name: "packedCoordinates",
+            type: "bytes",
+            internalType: "bytes",
+          },
+        ],
+        internalType: "struct CirclesArbbotMiddleware.Path",
+      },
+    ],
+    outputs: [
+      {
+        name: "profit",
+        type: "uint256",
+        internalType: "uint256",
+      },
+    ],
+    stateMutability: "payable",
+  },
+];

@@ -1,6 +1,7 @@
 import pg from "pg";
 const { Client } = pg;
 import WebSocket from "ws";
+import assert from "assert";
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
@@ -18,6 +19,7 @@ import {
   DataInterfaceParams,
   SwapExecutionOptions,
   TradeExecutionResult,
+  Trade,
 } from "./interfaces/index.js";
 
 // Import ethers v6
@@ -30,6 +32,7 @@ import {
   erc20LiftAbi,
   inflationaryTokenAbi,
   bouncerOrgAbi,
+  middlewareAbi,
 } from "./abi/index.js";
 
 import {
@@ -63,6 +66,7 @@ const SELLOFF_PRECISION = BigInt(1e12);
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
 const crcBouncerOrgAddress = "0x98B1e32Af39C1d3a33A9a2b7fe167b1b4a190872";
+const middlewareAddress = "";
 
 /**
  * @notice Initializes core blockchain objects.
@@ -861,6 +865,110 @@ export class DataInterface {
     return false;
   }
 
+  public async getPathfinderTransferData(params: {
+    from: CirclesNode;
+    to: CirclesNode;
+    requestedAmount: bigint;
+  }): Promise<bigint | null> {
+    try {
+      // we assume that the max flow from the deal findingis still uptodate
+      // so we don't actually update this.
+
+      const toAddress = params.to.isGroup
+        ? params.to.mintHandler!
+        : crcBouncerOrgAddress;
+      const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
+
+      if (!params.to.isGroup) {
+        console.log("Forcing trust for ", params.to.avatar);
+        const trustUpdated = await this.updateBouncerOrgTrust(params.to.avatar);
+        if (!trustUpdated) {
+          console.log("Failed to update bouncer org trust relationships");
+          return null;
+        }
+      }
+
+      const maxHolder = await this.getMaxHolder(params.from.avatar);
+
+      const buildPath = await this.sdk.v2Pathfinder.getPath(
+        maxHolder,
+        toAddress,
+        params.requestedAmount,
+        true,
+        [params.from.avatar],
+        [params.to.avatar],
+      );
+
+      const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
+        middlewareAddress,
+        crcBouncerOrgAddress,
+        buildPath.maxFlow,
+        buildPath.transfers.map((transfer: any) => {
+          return {
+            from:
+              transfer.from == maxHolder ? middlewareAddress : transfer.from,
+            to: transfer.to == maxHolder ? middlewareAddress : transfer.to,
+            tokenOwner: transfer.tokenOwner,
+            value: transfer.value,
+          };
+        }),
+      );
+
+      return theFlow;
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        console.error("Error in flowData generation:", error.message);
+      } else {
+        console.error("Error in flowData generation:", error);
+      }
+      return null;
+    }
+  }
+
+  // Then modify the executeTrade function:
+  async executeWithMiddleware(trade: Trade): Promise<boolean> {
+    try {
+      const middlewareContract = new Contract(
+        middlewareAddress,
+        middlewareAbi,
+        wallet,
+      );
+
+      const demurragedAmount = await this.convertInflationaryToDemurrage(
+        trade.buyNode.erc20tokenAddress,
+        trade.amount,
+      );
+
+      // Prepare operateFlowMatrix Data
+      const pathFlow = this.getPathfinderTransferData({
+        from: trade.buyNode,
+        to: trade.sellNode,
+        requestedAmount: demurragedAmount,
+      });
+
+      assert(
+        trade.buyQuote.outputAmount.amount ===
+          trade.sellQuote.inputAmount.amount,
+        "Buy output amount must equal sell input amount",
+      );
+
+      // Execute trade through contract
+      const tx = await middlewareContract.executeSequentialBatchSwaps(
+        trade.buyQuote.inputAmount.amount,
+        trade.buyQuote.outputAmount.amount,
+        trade.sellQuote.inputAmount.amount,
+        trade.buyQuote,
+        trade.sellQuote,
+        pathFlow,
+      );
+
+      const receipt = await tx.wait();
+      return receipt.status === 1;
+    } catch (error) {
+      console.error("Trade execution failed:", error);
+      return false;
+    }
+  }
   /**
    * @notice Executes a complete trade including buy, transfer and sell steps
    */

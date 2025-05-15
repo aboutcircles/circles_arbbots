@@ -528,40 +528,43 @@ class ArbitrageBot {
   }
 
   async executeTrade(trade: Trade): Promise<boolean> {
-    const options: SwapExecutionOptions = {
-      slippage: 0.1,
-      maxRetries: 10,
-      retryDelay: 2000,
-    };
+    // const options: SwapExecutionOptions = {
+    //   slippage: 0.1,
+    //   maxRetries: 10,
+    //   retryDelay: 2000,
+    // };
 
     try {
       // Execute main trade
-      const result = await this.dataInterface.executeCompleteTrade({
-        buyNode: trade.buyNode,
-        sellNode: trade.sellNode,
-        buyQuote: trade.buyQuote,
-        initialAmount: trade.amount,
-        options,
-      });
+      //
+      const result = await this.dataInterface.executeWithMiddleware(trade);
+
+      // const result = await this.dataInterface.executeCompleteTrade({
+      //   buyNode: trade.buyNode,
+      //   sellNode: trade.sellNode,
+      //   buyQuote: trade.buyQuote,
+      //   initialAmount: trade.amount,
+      //   options,
+      // });
 
       // Always attempt cleanup regardless of main trade result
-      try {
-        // await Promise.all([
-        //   this.dataInterface.cleanupToken(trade.buyNode.erc20tokenAddress, {
-        //     ...options,
-        //     slippage: 1.0, // Higher slippage for cleanup
-        //   }),
-        //   this.dataInterface.cleanupToken(trade.sellNode.erc20tokenAddress, {
-        //     ...options,
-        //     slippage: 1.0,
-        //   }),
-        // ]);
-        console.log("Skipping cleanup");
-      } catch (cleanupError) {
-        console.error("Cleanup failed:", cleanupError);
-      }
+      // try {
+      //   // await Promise.all([
+      //   //   this.dataInterface.cleanupToken(trade.buyNode.erc20tokenAddress, {
+      //   //     ...options,
+      //   //     slippage: 1.0, // Higher slippage for cleanup
+      //   //   }),
+      //   //   this.dataInterface.cleanupToken(trade.sellNode.erc20tokenAddress, {
+      //   //     ...options,
+      //   //     slippage: 1.0,
+      //   //   }),
+      //   // ]);
+      //   console.log("Skipping cleanup");
+      // } catch (cleanupError) {
+      //   console.error("Cleanup failed:", cleanupError);
+      // }
 
-      return result.success;
+      return result;
     } catch (error) {
       console.error("Trade execution failed:", error);
       return false;
