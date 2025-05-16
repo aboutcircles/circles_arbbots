@@ -496,6 +496,8 @@ class ArbitrageBot {
 
     // @todo: This needs to be improved as right now it simply reverts wheneever it doesn't get a good quote (e.g. because of missing liquidity in the pools...)
     while (currentAmount < liquidity / 2n) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
       currentAmount *= 2n;
 
       // Get quotes for reduced amount
