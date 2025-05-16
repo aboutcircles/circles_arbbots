@@ -445,6 +445,7 @@ class ArbitrageBot {
     target: CirclesNode,
     liquidity: bigint,
   ): Promise<Trade | null> {
+    // @todo rework to have buy collateral at slightly lover value
     let currentAmount = MIN_BUYING_AMOUNT;
 
     let collateralBalance = await this.dataInterface.getTradingTokenBalance();
@@ -459,7 +460,7 @@ class ArbitrageBot {
     const initialSellQuote = await this.dataInterface.getTradingQuote({
       tokenAddress: target.erc20tokenAddress,
       direction: Direction.SELL,
-      amount: currentAmount,
+      amount: currentAmount * 999n / 1000n,
     });
 
     if (
@@ -495,7 +496,7 @@ class ArbitrageBot {
       const sellQuote = await this.dataInterface.getTradingQuote({
         tokenAddress: target.erc20tokenAddress,
         direction: Direction.SELL,
-        amount: currentAmount,
+        amount: currentAmount * 999n / 1000n,
       });
 
       if (!buyQuote || !sellQuote) {
