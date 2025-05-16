@@ -684,6 +684,8 @@ async function amountOutGuesser(
     await theoreticallyAvailableAmountCRC(tokenToCheck);
 
   for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
     // Propose a new amount by doubling the current amount out.
     const proposedAmountOut = currentAmountOut * 2n;
     const quote = await fetchBalancerQuote({

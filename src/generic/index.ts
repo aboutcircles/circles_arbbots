@@ -322,6 +322,19 @@ class ArbitrageBot {
 
     if (optimalTrade) {
       console.log(`Found trade with profit: ${optimalTrade.profit.toString()}`);
+
+      if (LOG_ACTIVITY) {
+        await this.dataInterface.logTradeOpportunity({
+          buyToken: optimalTrade.buyNode.erc20tokenAddress,
+          sellToken: optimalTrade.sellNode.erc20tokenAddress,
+          referenceToken: this.dataInterface.tradingToken.address,
+          buyAmount: optimalTrade.buyQuote.inputAmount.amount,
+          intermediateAmount: optimalTrade.amount,
+          sellAmount: optimalTrade.sellQuote.outputAmount.amount,
+          estimatedProfit: optimalTrade.profit,
+        });
+      }
+
       if (optimalTrade.profit > PROFIT_THRESHOLD) {
         console.log("Trade exceeds profit threshold, executing...");
         await this.executeTrade(optimalTrade);
@@ -484,6 +497,8 @@ class ArbitrageBot {
 
     // @todo: This needs to be improved as right now it simply reverts wheneever it doesn't get a good quote (e.g. because of missing liquidity in the pools...)
     while (currentAmount < liquidity / 2n) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
       currentAmount *= 2n;
 
       // Get quotes for reduced amount

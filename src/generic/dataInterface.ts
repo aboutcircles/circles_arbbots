@@ -91,7 +91,9 @@ const hubV2Contract = new Contract(
   wallet,
 );
 
-const logQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+const logQuoteInsertQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
+
+const logTradeInsertQuery = `INSERT INTO "tradeOpportunties" ("timestamp", "buytoken", "selltoken", "referencetoken", "buyamount", "intermediateamount", "sellamount", "estimatedprofit") VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)`;
 
 const middlewareContract = new Contract(
   middlewareAddress,
@@ -626,6 +628,36 @@ export class DataInterface {
   }
 
   /**
+   * @notice Logs a trade opportunity to the database
+   * @param tradeOpportunity The trade opportunity to log
+   */
+  public async logTradeOpportunity(params: {
+    buyToken: string;
+    sellToken: string;
+    referenceToken: string;
+    buyAmount: bigint;
+    intermediateAmount: bigint;
+    sellAmount: bigint;
+    estimatedProfit: bigint;
+  }): Promise<void> {
+    try {
+      const logValues = [
+        Math.floor(Date.now() / 1000),
+        params.buyToken,
+        params.sellToken,
+        params.referenceToken,
+        params.buyAmount.toString(),
+        params.intermediateAmount.toString(),
+        params.sellAmount.toString(),
+        params.estimatedProfit.toString(),
+      ];
+      await this.loggerClient.query(logTradeInsertQuery, logValues);
+    } catch (error) {
+      console.error("Error logging trade opportunity:", error);
+    }
+  }
+
+  /**
    * @notice Fetches the latest Balancer swap quote for a token.
    * @param tokenAddress The token address to get a quote for.
    * @param amountOut The output amount for the swap.
@@ -674,7 +706,7 @@ export class DataInterface {
           null,
           amount.toString(),
         ];
-        await this.loggerClient.query(logQuery, logValues);
+        await this.loggerClient.query(logQuoteInsertQuery, logValues);
       }
       console.log("No path found");
       return null;
@@ -694,7 +726,7 @@ export class DataInterface {
         swap.inputAmount.amount.toString(),
         swap.outputAmount.amount.toString(),
       ];
-      await this.loggerClient.query(logQuery, logValues);
+      await this.loggerClient.query(logQuoteInsertQuery, logValues);
     }
 
     // @dev We attempt to make this call to validate the swap parameters, ensuring we avoid potential errors such as `BAL#305` or other issues related to swap input parameters.
