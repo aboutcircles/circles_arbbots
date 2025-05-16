@@ -1,6 +1,7 @@
 import pg from "pg";
 const { Client } = pg;
 import WebSocket from "ws";
+import assert from "assert";
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
@@ -18,6 +19,7 @@ import {
   DataInterfaceParams,
   SwapExecutionOptions,
   TradeExecutionResult,
+  Trade,
 } from "./interfaces/index.js";
 
 // Import ethers v6
@@ -29,7 +31,7 @@ import {
   hubV2Abi,
   erc20LiftAbi,
   inflationaryTokenAbi,
-  bouncerOrgAbi,
+  middlewareAbi,
 } from "./abi/index.js";
 
 import {
@@ -61,8 +63,7 @@ const SELLOFF_PRECISION = BigInt(1e12);
 
 // Constant addresses
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
-const balancerVaultAddress = "0xBA12222222228d8Ba445958a75a0704d566BF2C8";
-const crcBouncerOrgAddress = "0x98B1e32Af39C1d3a33A9a2b7fe167b1b4a190872";
+const middlewareAddress = "0x6C301FCe295c0524dd1FEeFF4eF2e43Fc5e7648d";
 
 /**
  * @notice Initializes core blockchain objects.
@@ -94,9 +95,9 @@ const logQuoteInsertQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "o
 
 const logTradeInsertQuery = `INSERT INTO "tradeOpportunties" ("timestamp", "buytoken", "selltoken", "referencetoken", "buyamount", "intermediateamount", "sellamount", "estimatedprofit") VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)`;
 
-const bouncerOrgContract = new Contract(
-  crcBouncerOrgAddress,
-  bouncerOrgAbi,
+const middlewareContract = new Contract(
+  middlewareAddress,
+  middlewareAbi,
   wallet,
 );
 
@@ -288,93 +289,6 @@ export class DataInterface {
     }
   }
 
-  public async changeCRC(params: {
-    from: CirclesNode;
-    to: CirclesNode;
-    requestedAmount: bigint;
-  }): Promise<bigint> {
-    try {
-      const toAddress = params.to.isGroup
-        ? params.to.mintHandler!
-        : crcBouncerOrgAddress;
-      const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
-
-      if (!params.to.isGroup) {
-        console.log("Forcing trust for ", params.to.avatar);
-        const trustUpdated = await this.updateBouncerOrgTrust(params.to.avatar);
-        if (!trustUpdated) {
-          console.log("Failed to update trust relationships");
-          return 0n;
-        }
-      }
-
-      const maxTransferableAmount = await this.getMaxTransferableAmount({
-        from: wallet.address as Address,
-        to: toAddress,
-        toTokens: toTokens,
-      });
-
-      console.log("Validating max transferrable amount:");
-      console.log(
-        "getMaxTransferableAmount arguments: from",
-        wallet.address,
-        "to:",
-        toAddress,
-        "toTokens:",
-        toTokens,
-      );
-      console.log(
-        "getMaxTransferableAmount returned:",
-        maxTransferableAmount.toString(),
-      );
-
-      let amountToTransfer =
-        params.requestedAmount > maxTransferableAmount
-          ? maxTransferableAmount
-          : params.requestedAmount;
-
-      amountToTransfer =
-        (amountToTransfer / BigInt(10 ** 12)) * BigInt(10 ** 12);
-
-      console.log(
-        "Attempting to transfer amount:",
-        amountToTransfer.toString(),
-      );
-
-      const transferResult = await this.sdkAvatar!.transfer(
-        toAddress,
-        amountToTransfer,
-        undefined,
-        undefined,
-        true,
-        undefined,
-        toTokens,
-      ).catch((error: unknown) => {
-        if (error instanceof Error) {
-          console.error("Transfer failed with error:", error.message);
-        } else {
-          console.error("Transfer failed with unknown error type:", error);
-        }
-        return false;
-      });
-
-      if (!transferResult) {
-        console.log("Transfer returned false or failed");
-        return 0n;
-      }
-
-      console.log("Transfer completed successfully");
-      return amountToTransfer;
-    } catch (error: unknown) {
-      if (error instanceof Error) {
-        console.error("Error in changeCRC:", error.message);
-      } else {
-        console.error("Unknown error in changeCRC:", error);
-      }
-      return 0n;
-    }
-  }
-
   public async getMaxTransferableAmount(params: {
     from: Address;
     to: Address;
@@ -450,24 +364,23 @@ export class DataInterface {
    * @param toTokens address to establish trust with
    * @return {Promise<boolean>} Returns true if rust relationships is successfully established
    */
-  private async updateBouncerOrgTrust(tokenAvatar: string): Promise<boolean> {
+  private async updateMiddlewareTrust(tokenAvatar: string): Promise<boolean> {
     try {
       // Check if trust already exists
       const isTrusted = await hubV2Contract.isTrusted(
-        crcBouncerOrgAddress,
+        middlewareAddress,
         tokenAvatar,
       );
 
       if (!isTrusted) {
-        // Force trust using the bouncer org contract
-        const tx = await bouncerOrgContract.forceTrust(tokenAvatar);
+        const tx = await middlewareContract.forceTrust(tokenAvatar);
         await tx.wait();
-        console.log(`Bouncer Org forceTrusted: ${tokenAvatar}`);
+        console.log(`Middleware forceTrusted: ${tokenAvatar}`);
       }
 
       return true;
     } catch (error) {
-      console.error("Error updating bouncer org trust:", error);
+      console.error("Error updating middleware trust:", error);
       return false;
     }
   }
@@ -847,201 +760,212 @@ export class DataInterface {
     await approveTx.wait();
   }
 
-  /**
-   * @notice Executes an arbitrage deal by ensuring proper token allowances and performing the swap.
-   * @param deal The Deal object containing the swap data and profitability flag.
-   * @param member The group member associated with the deal (used for context/logging).
-   * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
-   */
-  public async execSwap(
-    swapData: Swap,
-    direction: Direction,
-    slippagePercentage: number,
-  ): Promise<boolean> {
-    console.log("Executing deal");
-
-    // Execute the swap using the prepared swap data.
-    return await this.swapUsingBalancer(
-      swapData,
-      direction,
-      slippagePercentage,
-    );
-  }
-
-  /**
-   * @notice Executes a swap with retry logic and custom slippage
-   */
-  public async executeSwapWithRetry(
-    swap: Swap,
-    direction: Direction,
-    options: SwapExecutionOptions,
-  ): Promise<boolean> {
-    for (let i = 0; i < (options.maxRetries ?? 3); i++) {
-      try {
-        const success = await this.execSwap(swap, direction, options.slippage);
-        if (success) return true;
-
-        if (i < (options.maxRetries ?? 3) - 1) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, options.retryDelay ?? 2000),
-          );
-        }
-      } catch (error) {
-        console.error(`Swap attempt ${i + 1} failed:`, error);
-      }
-    }
-    return false;
-  }
-
-  /**
-   * @notice Executes a complete trade including buy, transfer and sell steps
-   */
-  public async executeCompleteTrade(params: {
-    buyNode: CirclesNode;
-    sellNode: CirclesNode;
-    buyQuote: Swap;
-    initialAmount: bigint;
-    options: SwapExecutionOptions;
-  }): Promise<TradeExecutionResult> {
+  public async getPathfinderTransferData(params: {
+    from: CirclesNode;
+    to: CirclesNode;
+    requestedAmount: bigint;
+  }) {
     try {
-      // Execute buy
-      const buySuccess = await this.executeSwapWithRetry(
-        params.buyQuote,
-        Direction.BUY,
-        params.options,
-      );
+      // we assume that the max flow from the deal findingis still uptodate
+      // so we don't actually update this here.
+      console.log("is group: ", params.to.isGroup)
+      const toAddress = params.to.isGroup
+        ? params.to.mintHandler!
+        : middlewareAddress;
+      const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
 
-      if (!buySuccess) {
-        return { success: false, error: "Buy transaction failed" };
+      if (!params.to.isGroup) {
+        console.log("Forcing trust for ", params.to.avatar);
+        const trustUpdated = await this.updateMiddlewareTrust(params.to.avatar);
+        if (!trustUpdated) {
+          console.log("Failed to update middleware trust relationships");
+          return null;
+        }
       }
 
-      // Wait for and verify bought amount
-      const boughtAmount = await this.getBotERC20BalanceWithRetry(
-        params.buyNode.erc20tokenAddress,
-        params.options.maxRetries,
-        params.options.retryDelay,
+      const maxHolder = await this.getMaxHolder(params.from.avatar);
+
+      const buildPath = await this.sdk.v2Pathfinder.getPath(
+        maxHolder,
+        toAddress,
+        params.requestedAmount,
+        false,
+        [params.from.avatar],
+        toTokens
       );
 
-      if (boughtAmount === 0n) {
-        return { success: false, error: "Failed to receive bought tokens" };
-      }
+      //console.log("Max flow smaller than the required amount");
+      //if(BigInt(buildPath.maxFlow) < BigInt(params.requestedAmount)) return null;
 
-      // Convert to demurraged units for transfer
+      const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
+        middlewareAddress,
+        middlewareAddress,
+        buildPath.maxFlow,
+        buildPath.transfers.map((transfer: any) => {
+          return {
+            from:
+              transfer.from == maxHolder ? middlewareAddress : transfer.from,
+            to: transfer.to,
+            tokenOwner: transfer.tokenOwner,
+            value: transfer.value,
+          };
+        }),
+      );
+
+      return theFlow;
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        console.error("Error in flowData generation:", error.message);
+      } else {
+        console.error("Error in flowData generation:", error);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Constructs the input parameters for executeSequentialBatchSwaps function
+   * @param {Object} buyQuote - The buy quote similar to sellQuote structure
+   * @param {Object} sellQuote - The sell quote data
+   * @param {Object} pathFlowData - The path flow data
+   */
+  private constructExecutionInput(buyQuote: any, sellQuote: any, pathFlowData: any) { // @todo fix type safety
+    // Validate required parameters
+    if (!buyQuote || !sellQuote) {
+      throw new Error("Missing required parameters");
+    }
+
+    // Calculate deadline (1 hour from now)
+    const deadline = Math.floor(Date.now() / 1000) + 3600;
+    // Construct buySwap object
+    const buySwap = {
+      swapKind: buyQuote.swap.swapKind,  // Usually 0 for GIVEN_IN or 1 for GIVEN_OUT
+      swaps: buyQuote.swap.swaps.map((swap: any) => ({
+        poolId: swap.poolId,
+        assetInIndex: Number(swap.assetInIndex || 0),
+        assetOutIndex: Number(swap.assetOutIndex || 0),
+        amount: swap.amount.toString(),
+        userData: swap.userData || "0x"
+      })),
+      assets: buyQuote.swap.assets,
+      funds: {
+        sender: middlewareAddress,
+        fromInternalBalance: false,
+        recipient: middlewareAddress,
+        toInternalBalance: false
+      },
+      // Set appropriate limits based on expected amounts
+      limits: buyQuote.swap.assets.map((asset: Address) => { // @todo add profitability to the limit
+        if (asset === buyQuote.inputAmount.token.address) {
+          return (buyQuote.inputAmount.amount * 12n / 10n).toString();
+        }
+        return "0";
+      }),
+      deadline: deadline
+    };
+
+    // Construct sellSwap object
+    const sellSwap = {
+      swapKind: sellQuote.swap.swapKind,
+      swaps: sellQuote.swap.swaps.map((swap:any) => ({
+        poolId: swap.poolId,
+        assetInIndex: Number(swap.assetInIndex || 0),
+        assetOutIndex: Number(swap.assetOutIndex || 0),
+        amount: swap.amount.toString(),
+        userData: swap.userData || "0x"
+      })),
+      assets: sellQuote.swap.assets,
+      funds: {
+        sender: middlewareAddress,
+        fromInternalBalance: false,
+        recipient: middlewareAddress,
+        toInternalBalance: false
+      },
+      // Set appropriate limits based on expected amounts
+      limits: sellQuote.swap.assets.map((asset: Address) => { // @todo these limits are insecure
+        if (asset === sellQuote.inputAmount.token.address) {
+          return sellQuote.inputAmount.amount.toString();
+        }
+        return "0";
+      }),
+      deadline: deadline
+    };
+
+    // Construct pathFlow object - either from provided data or create a basic one
+    // const pathFlow = pathFlowData || createDefaultPathFlow(buyQuote, sellQuote);
+
+    return [buySwap, sellSwap, buySwap.assets.indexOf(buyQuote.outputAmount.token.address)];// @todo finish
+  }
+
+  // Then modify the executeTrade function:
+  async executeWithMiddleware(trade: Trade): Promise<boolean> {
+    try {
+      const middlewareContract = new Contract(
+        middlewareAddress,
+        middlewareAbi,
+        wallet,
+      );
+
       const demurragedAmount = await this.convertInflationaryToDemurrage(
-        params.buyNode.erc20tokenAddress,
-        boughtAmount,
+        trade.buyNode.erc20tokenAddress,
+        trade.amount,
       );
 
-      // Execute transfer
-      const transferredAmount = await this.changeCRC({
-        from: params.buyNode,
-        to: params.sellNode,
+      // Prepare operateFlowMatrix Data
+      const pathFlow = await this.getPathfinderTransferData({
+        from: trade.buyNode,
+        to: trade.sellNode,
         requestedAmount: demurragedAmount,
       });
 
+      const [buySwapData, sellSwapData, buyAssetIndex] = this.constructExecutionInput(trade.buyQuote, trade.sellQuote, null);
+      //177608493266592
+      //177608493266592n
+      await this.approveTokens(
+        trade.buyQuote.inputAmount.token.address,
+        middlewareAddress,
+        buySwapData.limits[0]
+      );
+      console.log("current allowance: ",
+        await this.checkAllowance(
+          trade.buyQuote.inputAmount.token.address,
+          wallet.address,
+          middlewareAddress
+        )
+      )
       console.log(
-        "Transferred amount from buy into sell tokens: ",
-        transferredAmount,
+        "bot balance:",
+        await this.getBotERC20Balance(trade.buyQuote.inputAmount.token.address)
+      );
+      console.dir({
+        buyAssetIndex,
+        buySwapData, sellSwapData, path: {
+          flowVertices: pathFlow.flowVertices,
+          flow: pathFlow.flowEdges,
+          streams: pathFlow.streams,
+          packedCoordinates: pathFlow.packedCoordinates
+        }
+      }, {depth: null});
+      //getBotERC20Balance()
+      // check the current balance and the required amount
+      const tx = await middlewareContract.executeSequentialBatchSwaps(
+        buyAssetIndex,
+        buySwapData,
+        sellSwapData,
+        {
+          flowVertices: pathFlow.flowVertices,
+          flow: pathFlow.flowEdges,
+          streams: pathFlow.streams,
+          packedCoordinates: pathFlow.packedCoordinates
+        }
       );
 
-      if (transferredAmount === 0n) {
-        return {
-          success: false,
-          boughtAmount,
-          error: "Transfer failed",
-        };
-      }
-
-      // Wrap transferred amount
-      await this.sdkAvatar?.wrapInflationErc20(
-        params.sellNode.avatar,
-        transferredAmount,
-      );
-
-      // Get final balance for sell
-      const sellAmount = await this.getBotERC20BalanceWithRetry(
-        params.sellNode.erc20tokenAddress,
-        params.options.maxRetries,
-        params.options.retryDelay,
-      );
-
-      if (sellAmount === 0n) {
-        return {
-          success: false,
-          boughtAmount,
-          error: "Failed to receive wrapped tokens",
-        };
-      }
-
-      // Execute sell
-      const sellQuote = await this.getTradingQuote({
-        tokenAddress: params.sellNode.erc20tokenAddress,
-        direction: Direction.SELL,
-        amount: sellAmount,
-      });
-
-      if (!sellQuote) {
-        return {
-          success: false,
-          boughtAmount,
-          error: "Failed to get sell quote",
-        };
-      }
-
-      const sellSuccess = await this.executeSwapWithRetry(
-        sellQuote,
-        Direction.SELL,
-        params.options,
-      );
-
-      return {
-        success: sellSuccess,
-        boughtAmount,
-        soldAmount: sellAmount,
-        error: sellSuccess ? undefined : "Sell transaction failed",
-      };
+      const receipt = await tx.wait();
+      console.log(receipt)
+      console.log("tx finished!")
+      return receipt.status === 1;
     } catch (error) {
-      return {
-        success: false,
-        error: `Trade execution failed: ${error}`,
-      };
-    }
-  }
-
-  /**
-   * @notice Attempts to sell any remaining balance of a token
-   */
-  public async cleanupToken(
-    tokenAddress: Address,
-    options: SwapExecutionOptions,
-  ): Promise<boolean> {
-    try {
-      const balance = await this.getBotERC20Balance(tokenAddress);
-
-      if (balance <= 0n) {
-        return true;
-      }
-
-      console.log(
-        `Cleaning up ${balance.toString()} tokens at ${tokenAddress}`,
-      );
-
-      const quote = await this.getTradingQuote({
-        tokenAddress,
-        direction: Direction.SELL,
-        amount: balance,
-      });
-
-      if (!quote) {
-        return false;
-      }
-
-      return await this.executeSwapWithRetry(quote, Direction.SELL, {
-        ...options,
-        slippage: options.slippage * 2, // Double slippage for cleanup
-      });
-    } catch (error) {
-      console.error("Cleanup failed:", error);
+      console.error("Trade execution failed:", error);
       return false;
     }
   }
@@ -1067,81 +991,6 @@ export class DataInterface {
       spenderAddress,
     );
     return allowance;
-  }
-
-  /**
-   * @notice Executes a swap on Balancer using the provided Swap object.
-   * @param swap The Swap object containing the swap parameters and paths.
-   * @return {Promise<boolean>} A promise that resolves to true if the swap is executed successfully, or false otherwise.
-   */
-  private async swapUsingBalancer(
-    swap: Swap,
-    direction: Direction,
-    slippagePercentage: number,
-  ): Promise<boolean> {
-    // Get up to date swap result by querying onchain
-
-    let updated;
-
-    if (direction == Direction.SELL) {
-      updated = (await swap.query(rpcUrl)) as ExactInQueryOutput;
-    } else if (direction == Direction.BUY) {
-      updated = (await swap.query(rpcUrl)) as ExactOutQueryOutput;
-    } else {
-      return false;
-    }
-
-    const wethIsEth = false; // If true, incoming ETH will be wrapped to WETH, otherwise the Vault will pull WETH tokens
-    const deadline = 999999999999999999n; // Deadline for the swap, in this case infinite
-    const slippage = Slippage.fromPercentage(
-      slippagePercentage.toString() as `${number}`,
-    );
-
-    let buildInput: SwapBuildCallInput;
-
-    buildInput = {
-      slippage,
-      deadline,
-      queryOutput: updated,
-      wethIsEth,
-      sender: wallet.address as `0x${string}`,
-      recipient: wallet.address as `0x${string}`,
-    };
-
-    const callData = swap.buildCall(buildInput) as SwapBuildOutputExactOut;
-
-    // If the token has not been approved yet, set the maximum allowance.
-    const tokenAddressToApprove = swap.inputAmount.token.address;
-    const currentAllowance = await this.checkAllowance(
-      tokenAddressToApprove,
-      wallet.address,
-      balancerVaultAddress,
-    );
-    let amountToApprove = callData?.maxAmountIn?.amount || BigInt(0);
-    if (amountToApprove < swap.inputAmount.amount) {
-      amountToApprove = swap.inputAmount.amount;
-    } else {
-      amountToApprove = amountToApprove + SELLOFF_PRECISION; // @dev notice add a slight overhead
-    }
-    if (currentAllowance < amountToApprove)
-      await this.approveTokens(
-        tokenAddressToApprove,
-        balancerVaultAddress,
-        amountToApprove,
-      );
-
-    return await wallet
-      .sendTransaction({ to: callData.to, data: callData.callData })
-      .then((txResponse) => {
-        console.log("Swap tx:", txResponse?.hash);
-
-        return !!txResponse?.hash;
-      })
-      .catch(async () => {
-        console.error("!!! Transaction failed !!!");
-
-        return false;
-      });
   }
 
   /**

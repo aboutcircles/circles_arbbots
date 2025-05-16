@@ -1,0 +1,396 @@
+{
+  buySwap: Swap {
+    swap: SwapV2 {
+      chainId: 100,
+      isBatchSwap: true,
+      paths: [
+        PathWithAmount {
+          pools: [
+            '0xbad20c15a773bf03ab973302f61fabcea5101f0a000000000000000000000034',
+            '0x5e08b6fe16f450668f38efa5493800dea392df8c000200000000000000000148'
+          ],
+          isBuffer: [ false, false ],
+          tokens: [
+            {
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18
+            },
+            {
+              address: '0x6a023ccd1ff6f2045c3309768ead9e68f978f6e1',
+              decimals: 18
+            },
+            {
+              address: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a',
+              decimals: 18
+            }
+          ],
+          outputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 1600000000000000000n,
+            scale18: 1600000000000000000n
+          },
+          inputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 35986594811669n,
+            scale18: 35986594811669n
+          }
+        },
+        PathWithAmount {
+          pools: [
+            '0x8dd4df4ce580b9644437f3375e54f1ab0980822800020000000000000000009c',
+            '0x5e08b6fe16f450668f38efa5493800dea392df8c000200000000000000000148'
+          ],
+          isBuffer: [ false, false ],
+          tokens: [
+            {
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18
+            },
+            {
+              address: '0x6a023ccd1ff6f2045c3309768ead9e68f978f6e1',
+              decimals: 18
+            },
+            {
+              address: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a',
+              decimals: 18
+            }
+          ],
+          outputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 1600000000000000000n,
+            scale18: 1600000000000000000n
+          },
+          inputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 35986727839394n,
+            scale18: 35986727839394n
+          }
+        }
+      ],
+      assets: [
+        '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+        '0x6a023ccd1ff6f2045c3309768ead9e68f978f6e1',
+        '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a'
+      ],
+      swapKind: 1,
+      swaps: [
+        {
+          poolId: '0x5e08b6fe16f450668f38efa5493800dea392df8c000200000000000000000148',
+          assetInIndex: 1n,
+          assetOutIndex: 2n,
+          amount: 1600000000000000000n,
+          userData: '0x'
+        },
+        {
+          poolId: '0xbad20c15a773bf03ab973302f61fabcea5101f0a000000000000000000000034',
+          assetInIndex: 0n,
+          assetOutIndex: 1n,
+          amount: 0n,
+          userData: '0x'
+        },
+        {
+          poolId: '0x5e08b6fe16f450668f38efa5493800dea392df8c000200000000000000000148',
+          assetInIndex: 1n,
+          assetOutIndex: 2n,
+          amount: 1600000000000000000n,
+          userData: '0x'
+        },
+        {
+          poolId: '0x8dd4df4ce580b9644437f3375e54f1ab0980822800020000000000000000009c',
+          assetInIndex: 0n,
+          assetOutIndex: 1n,
+          amount: 0n,
+          userData: '0x'
+        }
+      ],
+      inputAmount: _TokenAmount {
+        token: Token {
+          chainId: 100,
+          address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+          decimals: 18,
+          symbol: undefined,
+          name: undefined,
+          wrapped: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6'
+        },
+        scalar: 1n,
+        decimalScale: 1000000000000000000n,
+        amount: 71973322651063n,
+        scale18: 71973322651063n
+      },
+      outputAmount: _TokenAmount {
+        token: Token {
+          chainId: 100,
+          address: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a',
+          decimals: 18,
+          symbol: undefined,
+          name: undefined,
+          wrapped: '0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a'
+        },
+        scalar: 1n,
+        decimalScale: 1000000000000000000n,
+        amount: 3200000000000000000n,
+        scale18: 3200000000000000000n
+      }
+    },
+    protocolVersion: 2
+  },
+  sellSwap: Swap {
+    swap: SwapV2 {
+      chainId: 100,
+      isBatchSwap: true,
+      paths: [
+        PathWithAmount {
+          pools: [
+            '0x532ac94fe747134b71cdfa9ef78ed30ca0da9eba000200000000000000000158',
+            '0xbc2acf5e821c5c9f8667a36bb1131dad26ed64f9000200000000000000000063'
+          ],
+          isBuffer: [ false, false ],
+          tokens: [
+            {
+              address: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829',
+              decimals: 18
+            },
+            {
+              address: '0xaf204776c7245bf4147c2612bf6e5972ee483701',
+              decimals: 18
+            },
+            {
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18
+            }
+          ],
+          outputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 89961881066294n,
+            scale18: 89961881066294n
+          },
+          inputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 1600000000000000000n,
+            scale18: 1600000000000000000n
+          }
+        },
+        PathWithAmount {
+          pools: [
+            '0x532ac94fe747134b71cdfa9ef78ed30ca0da9eba000200000000000000000158',
+            '0x63040b66d7e58fe564e760c0ac058afe45c8cbdb000200000000000000000153',
+            '0x1445d65adcce244505491ccad8a86d161252a0de00020000000000000000012b',
+            '0x717633a41211c944c7808013b44824c3d9bb63cd000200000000000000000116'
+          ],
+          isBuffer: [ false, false, false, false ],
+          tokens: [
+            {
+              address: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829',
+              decimals: 18
+            },
+            {
+              address: '0xaf204776c7245bf4147c2612bf6e5972ee483701',
+              decimals: 18
+            },
+            {
+              address: '0x0d8c4901dd270fe101b8014a5dbecc4e4432eb1e',
+              decimals: 18
+            },
+            {
+,
+              decimals: 8
+            },
+            {
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18
+            }
+          ],
+          outputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 83606466722558n,
+            scale18: 83606466722558n
+          },
+          inputAmount: _TokenAmount {
+            token: Token {
+              chainId: 100,
+              address: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829',
+              decimals: 18,
+              symbol: undefined,
+              name: undefined,
+              wrapped: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829'
+            },
+            scalar: 1n,
+            decimalScale: 1000000000000000000n,
+            amount: 1600000000000000000n,
+            scale18: 1600000000000000000n
+          }
+        }
+      ],
+      assets: [
+        '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829',
+        '0xaf204776c7245bf4147c2612bf6e5972ee483701',
+        '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+        '0x0d8c4901dd270fe101b8014a5dbecc4e4432eb1e',
+        '0x8e5bbbb09ed1ebde8674cda39a0c169401db4252'
+      ],
+      swapKind: 0,
+      swaps: [
+        {
+          poolId: '0x532ac94fe747134b71cdfa9ef78ed30ca0da9eba000200000000000000000158',
+          assetInIndex: 0n,
+          assetOutIndex: 1n,
+          amount: 1600000000000000000n,
+          userData: '0x'
+        },
+        {
+          poolId: '0xbc2acf5e821c5c9f8667a36bb1131dad26ed64f9000200000000000000000063',
+          assetInIndex: 1n,
+          assetOutIndex: 2n,
+          amount: 0n,
+          userData: '0x'
+        },
+        {
+          poolId: '0x532ac94fe747134b71cdfa9ef78ed30ca0da9eba000200000000000000000158',
+          assetInIndex: 0n,
+          assetOutIndex: 1n,
+          amount: 1600000000000000000n,
+          userData: '0x'
+        },
+        {
+          poolId: '0x63040b66d7e58fe564e760c0ac058afe45c8cbdb000200000000000000000153',
+          assetInIndex: 1n,
+          assetOutIndex: 3n,
+          amount: 0n,
+          userData: '0x'
+        },
+        {
+          poolId: '0x1445d65adcce244505491ccad8a86d161252a0de00020000000000000000012b',
+          assetInIndex: 3n,
+          assetOutIndex: 4n,
+          amount: 0n,
+          userData: '0x'
+        },
+        {
+          poolId: '0x717633a41211c944c7808013b44824c3d9bb63cd000200000000000000000116',
+          assetInIndex: 4n,
+          assetOutIndex: 2n,
+          amount: 0n,
+          userData: '0x'
+        }
+      ],
+      inputAmount: _TokenAmount {
+        token: Token {
+          chainId: 100,
+          address: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829',
+          decimals: 18,
+          symbol: undefined,
+          name: undefined,
+          wrapped: '0x4f1e348cfe96043c9866d01eb42aa08f9c9b2829'
+        },
+        scalar: 1n,
+        decimalScale: 1000000000000000000n,
+        amount: 3200000000000000000n,
+        scale18: 3200000000000000000n
+      },
+      outputAmount: _TokenAmount {
+        token: Token {
+          chainId: 100,
+          address: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6',
+          decimals: 18,
+          symbol: undefined,
+          name: undefined,
+          wrapped: '0x6c76971f98945ae98dd7d4dfca8711ebea946ea6'
+        },
+        scalar: 1n,
+        decimalScale: 1000000000000000000n,
+        amount: 173568347788852n,
+        scale18: 173568347788852n
+      }
+    },
+    protocolVersion: 2
+  }
+}
+
+{
+  flowVertices: [
+    '0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026',
+    '0xa432f24acf7f7ce523c204d934dad72bde0ca215',
+    '0xd14ce9cfc6384590c6b77436dca212a6bcb2575f',
+    '0xe536720791a7dadbebdbcd8c8546fb0791a11901'
+  ],
+  flowEdges: [
+    { streamSinkId: 0, amount: 2295030745200309857n },
+    { streamSinkId: 1, amount: 2295030745200309857n }
+  ],
+  streams: [
+    {
+      sourceCoordinate: 3,
+      flowEdgeIds: [Array],
+      data: Uint8Array(0) []
+    }
+  ],
+  packedCoordinates: Uint8Array(12) [
+    0, 0, 0, 3, 0,
+    1, 0, 2, 0, 1,
+    0, 3
+  ],
+  sourceCoordinate: 3
+}
