@@ -473,7 +473,7 @@ class ArbitrageBot {
     const initialSellQuote = await this.dataInterface.getTradingQuote({
       tokenAddress: target.erc20tokenAddress,
       direction: Direction.SELL,
-      amount: currentAmount * 999n / 1000n,
+      amount: (currentAmount * 999n) / 1000n,
     });
 
     if (
@@ -511,7 +511,7 @@ class ArbitrageBot {
       const sellQuote = await this.dataInterface.getTradingQuote({
         tokenAddress: target.erc20tokenAddress,
         direction: Direction.SELL,
-        amount: currentAmount * 999n / 1000n,
+        amount: (currentAmount * 999n) / 1000n,
       });
 
       if (!buyQuote || !sellQuote) {
@@ -544,41 +544,8 @@ class ArbitrageBot {
   }
 
   async executeTrade(trade: Trade): Promise<boolean> {
-    // const options: SwapExecutionOptions = {
-    //   slippage: 0.1,
-    //   maxRetries: 10,
-    //   retryDelay: 2000,
-    // };
-
     try {
-      // Execute main trade
-      //
       const result = await this.dataInterface.executeWithMiddleware(trade);
-
-      // const result = await this.dataInterface.executeCompleteTrade({
-      //   buyNode: trade.buyNode,
-      //   sellNode: trade.sellNode,
-      //   buyQuote: trade.buyQuote,
-      //   initialAmount: trade.amount,
-      //   options,
-      // });
-
-      // Always attempt cleanup regardless of main trade result
-      // try {
-      //   // await Promise.all([
-      //   //   this.dataInterface.cleanupToken(trade.buyNode.erc20tokenAddress, {
-      //   //     ...options,
-      //   //     slippage: 1.0, // Higher slippage for cleanup
-      //   //   }),
-      //   //   this.dataInterface.cleanupToken(trade.sellNode.erc20tokenAddress, {
-      //   //     ...options,
-      //   //     slippage: 1.0,
-      //   //   }),
-      //   // ]);
-      //   console.log("Skipping cleanup");
-      // } catch (cleanupError) {
-      //   console.error("Cleanup failed:", cleanupError);
-      // }
 
       return result;
     } catch (error) {

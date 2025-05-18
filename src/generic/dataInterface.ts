@@ -768,7 +768,7 @@ export class DataInterface {
     try {
       // we assume that the max flow from the deal findingis still uptodate
       // so we don't actually update this here.
-      console.log("is group: ", params.to.isGroup)
+      console.log("is group: ", params.to.isGroup);
       const toAddress = params.to.isGroup
         ? params.to.mintHandler!
         : middlewareAddress;
@@ -791,7 +791,7 @@ export class DataInterface {
         params.requestedAmount,
         false,
         [params.from.avatar],
-        toTokens
+        toTokens,
       );
 
       //console.log("Max flow smaller than the required amount");
@@ -827,9 +827,9 @@ export class DataInterface {
    * Constructs the input parameters for executeSequentialBatchSwaps function
    * @param {Object} buyQuote - The buy quote similar to sellQuote structure
    * @param {Object} sellQuote - The sell quote data
-   * @param {Object} pathFlowData - The path flow data
    */
-  private constructExecutionInput(buyQuote: any, sellQuote: any, pathFlowData: any) { // @todo fix type safety
+  private constructExecutionInput(buyQuote: any, sellQuote: any) {
+    // @todo fix type safety
     // Validate required parameters
     if (!buyQuote || !sellQuote) {
       throw new Error("Missing required parameters");
@@ -839,65 +839,70 @@ export class DataInterface {
     const deadline = Math.floor(Date.now() / 1000) + 3600;
     // Construct buySwap object
     const buySwap = {
-      swapKind: buyQuote.swap.swapKind,  // Usually 0 for GIVEN_IN or 1 for GIVEN_OUT
+      swapKind: buyQuote.swap.swapKind, // Usually 0 for GIVEN_IN or 1 for GIVEN_OUT
       swaps: buyQuote.swap.swaps.map((swap: any) => ({
         poolId: swap.poolId,
         assetInIndex: Number(swap.assetInIndex || 0),
         assetOutIndex: Number(swap.assetOutIndex || 0),
         amount: swap.amount.toString(),
-        userData: swap.userData || "0x"
+        userData: swap.userData || "0x",
       })),
       assets: buyQuote.swap.assets,
       funds: {
         sender: middlewareAddress,
         fromInternalBalance: false,
         recipient: middlewareAddress,
-        toInternalBalance: false
+        toInternalBalance: false,
       },
       // Set appropriate limits based on expected amounts
-      limits: buyQuote.swap.assets.map((asset: Address) => { // @todo add profitability to the limit
+      limits: buyQuote.swap.assets.map((asset: Address) => {
+        // @todo add profitability to the limit
         if (asset === buyQuote.inputAmount.token.address) {
-          return (buyQuote.inputAmount.amount * 12n / 10n).toString();
+          return ((buyQuote.inputAmount.amount * 12n) / 10n).toString();
         }
         return "0";
       }),
-      deadline: deadline
+      deadline: deadline,
     };
 
     // Construct sellSwap object
     const sellSwap = {
       swapKind: sellQuote.swap.swapKind,
-      swaps: sellQuote.swap.swaps.map((swap:any) => ({
+      swaps: sellQuote.swap.swaps.map((swap: any) => ({
         poolId: swap.poolId,
         assetInIndex: Number(swap.assetInIndex || 0),
         assetOutIndex: Number(swap.assetOutIndex || 0),
         amount: swap.amount.toString(),
-        userData: swap.userData || "0x"
+        userData: swap.userData || "0x",
       })),
       assets: sellQuote.swap.assets,
       funds: {
         sender: middlewareAddress,
         fromInternalBalance: false,
         recipient: middlewareAddress,
-        toInternalBalance: false
+        toInternalBalance: false,
       },
       // Set appropriate limits based on expected amounts
-      limits: sellQuote.swap.assets.map((asset: Address) => { // @todo these limits are insecure
+      limits: sellQuote.swap.assets.map((asset: Address) => {
+        // @todo these limits are insecure
         if (asset === sellQuote.inputAmount.token.address) {
           return sellQuote.inputAmount.amount.toString();
         }
         return "0";
       }),
-      deadline: deadline
+      deadline: deadline,
     };
 
     // Construct pathFlow object - either from provided data or create a basic one
     // const pathFlow = pathFlowData || createDefaultPathFlow(buyQuote, sellQuote);
 
-    return [buySwap, sellSwap, buySwap.assets.indexOf(buyQuote.outputAmount.token.address)];// @todo finish
+    return [
+      buySwap,
+      sellSwap,
+      buySwap.assets.indexOf(buyQuote.outputAmount.token.address),
+    ]; // @todo finish
   }
 
-  // Then modify the executeTrade function:
   async executeWithMiddleware(trade: Trade): Promise<boolean> {
     try {
       const middlewareContract = new Contract(
@@ -918,34 +923,40 @@ export class DataInterface {
         requestedAmount: demurragedAmount,
       });
 
-      const [buySwapData, sellSwapData, buyAssetIndex] = this.constructExecutionInput(trade.buyQuote, trade.sellQuote, null);
-      //177608493266592
-      //177608493266592n
+      const [buySwapData, sellSwapData, buyAssetIndex] =
+        this.constructExecutionInput(trade.buyQuote, trade.sellQuote);
+
       await this.approveTokens(
         trade.buyQuote.inputAmount.token.address,
         middlewareAddress,
-        buySwapData.limits[0]
+        buySwapData.limits[0],
       );
-      console.log("current allowance: ",
+      console.log(
+        "current allowance: ",
         await this.checkAllowance(
           trade.buyQuote.inputAmount.token.address,
           wallet.address,
-          middlewareAddress
-        )
-      )
+          middlewareAddress,
+        ),
+      );
       console.log(
         "bot balance:",
-        await this.getBotERC20Balance(trade.buyQuote.inputAmount.token.address)
+        await this.getBotERC20Balance(trade.buyQuote.inputAmount.token.address),
       );
-      console.dir({
-        buyAssetIndex,
-        buySwapData, sellSwapData, path: {
-          flowVertices: pathFlow.flowVertices,
-          flow: pathFlow.flowEdges,
-          streams: pathFlow.streams,
-          packedCoordinates: pathFlow.packedCoordinates
-        }
-      }, {depth: null});
+      console.dir(
+        {
+          buyAssetIndex,
+          buySwapData,
+          sellSwapData,
+          path: {
+            flowVertices: pathFlow.flowVertices,
+            flow: pathFlow.flowEdges,
+            streams: pathFlow.streams,
+            packedCoordinates: pathFlow.packedCoordinates,
+          },
+        },
+        { depth: null },
+      );
       //getBotERC20Balance()
       // check the current balance and the required amount
       const tx = await middlewareContract.executeSequentialBatchSwaps(
@@ -956,13 +967,13 @@ export class DataInterface {
           flowVertices: pathFlow.flowVertices,
           flow: pathFlow.flowEdges,
           streams: pathFlow.streams,
-          packedCoordinates: pathFlow.packedCoordinates
-        }
+          packedCoordinates: pathFlow.packedCoordinates,
+        },
       );
 
       const receipt = await tx.wait();
-      console.log(receipt)
-      console.log("tx finished!")
+      console.log(receipt);
+      console.log("tx finished!");
       return receipt.status === 1;
     } catch (error) {
       console.error("Trade execution failed:", error);
