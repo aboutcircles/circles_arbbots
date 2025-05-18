@@ -95,6 +95,18 @@ const logQuoteInsertQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "o
 
 const logTradeInsertQuery = `INSERT INTO "tradeOpportunties" ("timestamp", "buytoken", "selltoken", "referencetoken", "buyamount", "intermediateamount", "sellamount", "estimatedprofit") VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)`;
 
+const logLiquidityEstimateQuery = `
+  INSERT INTO "liquidity_estimates" (
+    "timestamp",
+    "source_avatar",
+    "target_avatar",
+    "source_token",
+    "target_token",
+    "liquidity"
+  )
+  VALUES (to_timestamp($1), $2, $3, $4, $5, $6)
+`;
+
 const middlewareContract = new Contract(
   middlewareAddress,
   middlewareAbi,
@@ -349,10 +361,22 @@ export class DataInterface {
       });
 
       // Convert demurraged to inflationary
-      return await this.convertDemurrageToInflationary(
+      const estimatedLiquidity = await this.convertDemurrageToInflationary(
         target.erc20tokenAddress,
         maxTransferableAmount,
       );
+
+      if (this.logActivity) {
+        await this.logLiquidityEstimate({
+          sourceAvatar: source.avatar,
+          targetAvatar: target.avatar,
+          sourceToken: source.erc20tokenAddress,
+          targetToken: target.erc20tokenAddress,
+          liquidity: estimatedLiquidity,
+        });
+      }
+
+      return estimatedLiquidity;
     } catch (error) {
       console.error("Error in getSimulatedLiquidity:", error);
       return 0n;
@@ -654,6 +678,28 @@ export class DataInterface {
       await this.loggerClient.query(logTradeInsertQuery, logValues);
     } catch (error) {
       console.error("Error logging trade opportunity:", error);
+    }
+  }
+
+  public async logLiquidityEstimate(params: {
+    sourceAvatar: string;
+    targetAvatar: string;
+    sourceToken: string;
+    targetToken: string;
+    liquidity: bigint;
+  }): Promise<void> {
+    try {
+      const logValues = [
+        Math.floor(Date.now() / 1000),
+        params.sourceAvatar,
+        params.targetAvatar,
+        params.sourceToken,
+        params.targetToken,
+        params.liquidity.toString(),
+      ];
+      await this.loggerClient.query(logLiquidityEstimateQuery, logValues);
+    } catch (error) {
+      console.error("Error logging liquidity estimate:", error);
     }
   }
 
