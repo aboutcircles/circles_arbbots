@@ -483,7 +483,44 @@ export class DataInterface {
     return nodes;
   }
 
-  // @dev: function for fetching a historical Price (currently) dummy because no such data source exists.
+  public async fetchLatestLiquidityEstimates(): Promise<Map<string, bigint>> {
+    try {
+      const query = `
+        WITH LatestEstimates AS (
+          SELECT
+            source_avatar,
+            target_avatar,
+            liquidity,
+            ROW_NUMBER() OVER (
+              PARTITION BY source_avatar, target_avatar
+              ORDER BY timestamp DESC
+            ) as rn
+          FROM liquidity_estimates
+        )
+        SELECT
+          source_avatar,
+          target_avatar,
+          liquidity
+        FROM LatestEstimates
+        WHERE rn = 1
+      `;
+
+      const result = await this.loggerClient.query(query);
+
+      // Create a map using concatenated addresses as key
+      const liquidityMap = new Map<string, bigint>();
+      result.rows.forEach((row) => {
+        const key = `${row.source_avatar}-${row.target_avatar}`;
+        liquidityMap.set(key, BigInt(row.liquidity));
+      });
+
+      return liquidityMap;
+    } catch (error) {
+      console.error("Error fetching latest liquidity estimates:", error);
+      return new Map();
+    }
+  }
+
   public async fetchLatestPrices(
     tokenAddresses: string[],
   ): Promise<Map<string, LatestPriceRow | null>> {

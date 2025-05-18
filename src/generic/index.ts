@@ -135,59 +135,77 @@ class ArbitrageBot {
       }
     }
 
-    // 9. Calculate and update actual liquidity for edges
+    // 9. Fetch latest liquidity estimates from database
+    console.log("Fetching historical liquidity estimates...");
+    const latestLiquidityEstimates =
+      await this.dataInterface.fetchLatestLiquidityEstimates();
+
+    // 10. Calculate and update actual liquidity for edges
     console.log("Calculating edge liquidity...");
     for (const sourceNode of nodes) {
       for (const targetNode of nodes) {
         if (sourceNode === targetNode) continue;
 
-        let relevantBalances: BalanceRow[] = [];
-        if (targetNode.isGroup) {
-          // For group targets, get balances of all group members
-          const groupMembers = groupMemberRelations.filter(
-            (rel) => rel.truster === targetNode.avatar,
-          );
-          groupMembers.forEach((member) => {
-            const memberBalances = balancesByAccount.get(member.trustee) || [];
-            relevantBalances.push(...memberBalances);
-          });
-        } else {
-          relevantBalances = balancesByAccount.get(targetNode.avatar) || [];
-        }
+        // Check if we have historical data for this edge
+        const historicalKey = `${sourceNode.avatar}-${targetNode.avatar}`;
+        const historicalLiquidity = latestLiquidityEstimates.get(historicalKey);
 
-        let relevantTrustRelations: TrustRelationRow[] = [];
-        if (sourceNode.isGroup) {
-          // For group sources, get trust relations for all group members
-          const groupMembers = groupMemberRelations.filter(
-            (rel) => rel.truster === sourceNode.avatar,
-          );
-          groupMembers.forEach((member) => {
-            const memberTrusts =
-              trustRelationsByTrustee.get(member.trustee) || [];
-            relevantTrustRelations.push(...memberTrusts);
-          });
-        } else {
-          relevantTrustRelations =
-            trustRelationsByTrustee.get(sourceNode.avatar) || [];
-        }
-
-        // Calculate total liquidity
-        let totalLiquidity = BigInt(0);
-        for (const balance of relevantBalances) {
-          for (const trust of relevantTrustRelations) {
-            if (balance.account === trust.truster) {
-              totalLiquidity += balance.demurragedTotalBalance;
-            }
-          }
-        }
-
-        // Update edge liquidity if there is any
-        if (totalLiquidity > 0n) {
+        if (historicalLiquidity !== undefined) {
+          // Use historical liquidity if available
           this.graph.updateEdgeAttribute(
             this.graph.edge(sourceNode.avatar, targetNode.avatar),
             "liquidity",
-            () => totalLiquidity,
+            () => historicalLiquidity,
           );
+        } else {
+          // Calculate new liquidity estimate if no historical data exists
+          let relevantBalances: BalanceRow[] = [];
+          if (targetNode.isGroup) {
+            const groupMembers = groupMemberRelations.filter(
+              (rel) => rel.truster === targetNode.avatar,
+            );
+            groupMembers.forEach((member) => {
+              const memberBalances =
+                balancesByAccount.get(member.trustee) || [];
+              relevantBalances.push(...memberBalances);
+            });
+          } else {
+            relevantBalances = balancesByAccount.get(targetNode.avatar) || [];
+          }
+
+          let relevantTrustRelations: TrustRelationRow[] = [];
+          if (sourceNode.isGroup) {
+            const groupMembers = groupMemberRelations.filter(
+              (rel) => rel.truster === sourceNode.avatar,
+            );
+            groupMembers.forEach((member) => {
+              const memberTrusts =
+                trustRelationsByTrustee.get(member.trustee) || [];
+              relevantTrustRelations.push(...memberTrusts);
+            });
+          } else {
+            relevantTrustRelations =
+              trustRelationsByTrustee.get(sourceNode.avatar) || [];
+          }
+
+          // Calculate total liquidity
+          let totalLiquidity = BigInt(0);
+          for (const balance of relevantBalances) {
+            for (const trust of relevantTrustRelations) {
+              if (balance.account === trust.truster) {
+                totalLiquidity += balance.demurragedTotalBalance;
+              }
+            }
+          }
+
+          // Update edge liquidity if there is any
+          if (totalLiquidity > 0n) {
+            this.graph.updateEdgeAttribute(
+              this.graph.edge(sourceNode.avatar, targetNode.avatar),
+              "liquidity",
+              () => totalLiquidity,
+            );
+          }
         }
       }
     }
