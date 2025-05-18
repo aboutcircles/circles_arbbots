@@ -117,16 +117,24 @@ class ArbitrageBot {
       this.graph.addNode(node.avatar, node);
     }
 
-    // 8. Create complete graph with initial zero liquidity
+    // 8. Fetch latest liquidity estimates from database
+    console.log("Fetching historical liquidity estimates...");
+    const latestLiquidityEstimates =
+      await this.dataInterface.fetchLatestLiquidityEstimates();
+
+    // 9. Create complete graph with initial liquidity from historical data or zero
     console.log(`Creating edges between ${nodes.length} nodes...`);
     let edgeCount = 0;
     for (const sourceNode of nodes) {
       for (const targetNode of nodes) {
         if (sourceNode === targetNode) continue;
 
+        const historicalKey = `${sourceNode.avatar}-${targetNode.avatar}`;
+        const historicalData = latestLiquidityEstimates.get(historicalKey);
+
         this.graph.addEdge(sourceNode.avatar, targetNode.avatar, {
-          liquidity: BigInt(0),
-          lastUpdated: Date.now(),
+          liquidity: historicalData ? historicalData.liquidity : BigInt(0),
+          lastUpdated: historicalData ? historicalData.timestamp : Date.now(),
         });
         edgeCount++;
         if (edgeCount % 1000 === 0) {
@@ -135,30 +143,15 @@ class ArbitrageBot {
       }
     }
 
-    // 9. Fetch latest liquidity estimates from database
-    console.log("Fetching historical liquidity estimates...");
-    const latestLiquidityEstimates =
-      await this.dataInterface.fetchLatestLiquidityEstimates();
-
-    // 10. Calculate and update actual liquidity for edges
-    console.log("Calculating edge liquidity...");
+    // 10. Calculate and update liquidity only for edges without historical data
+    console.log("Calculating missing edge liquidity...");
     for (const sourceNode of nodes) {
       for (const targetNode of nodes) {
         if (sourceNode === targetNode) continue;
 
-        // Check if we have historical data for this edge
         const historicalKey = `${sourceNode.avatar}-${targetNode.avatar}`;
-        const historicalLiquidity = latestLiquidityEstimates.get(historicalKey);
-
-        if (historicalLiquidity !== undefined) {
-          // Use historical liquidity if available
-          this.graph.updateEdgeAttribute(
-            this.graph.edge(sourceNode.avatar, targetNode.avatar),
-            "liquidity",
-            () => historicalLiquidity,
-          );
-        } else {
-          // Calculate new liquidity estimate if no historical data exists
+        if (!latestLiquidityEstimates.has(historicalKey)) {
+          // Calculate new liquidity estimate only if no historical data exists
           let relevantBalances: BalanceRow[] = [];
           if (targetNode.isGroup) {
             const groupMembers = groupMemberRelations.filter(

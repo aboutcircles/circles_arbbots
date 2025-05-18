@@ -483,7 +483,9 @@ export class DataInterface {
     return nodes;
   }
 
-  public async fetchLatestLiquidityEstimates(): Promise<Map<string, bigint>> {
+  public async fetchLatestLiquidityEstimates(): Promise<
+    Map<string, { liquidity: bigint; timestamp: number }>
+  > {
     try {
       const query = `
         WITH LatestEstimates AS (
@@ -491,6 +493,7 @@ export class DataInterface {
             source_avatar,
             target_avatar,
             liquidity,
+            timestamp,
             ROW_NUMBER() OVER (
               PARTITION BY source_avatar, target_avatar
               ORDER BY timestamp DESC
@@ -500,18 +503,24 @@ export class DataInterface {
         SELECT
           source_avatar,
           target_avatar,
-          liquidity
+          liquidity,
+          EXTRACT(EPOCH FROM timestamp) as timestamp
         FROM LatestEstimates
         WHERE rn = 1
       `;
 
       const result = await this.loggerClient.query(query);
 
-      // Create a map using concatenated addresses as key
-      const liquidityMap = new Map<string, bigint>();
+      const liquidityMap = new Map<
+        string,
+        { liquidity: bigint; timestamp: number }
+      >();
       result.rows.forEach((row) => {
         const key = `${row.source_avatar}-${row.target_avatar}`;
-        liquidityMap.set(key, BigInt(row.liquidity));
+        liquidityMap.set(key, {
+          liquidity: BigInt(row.liquidity),
+          timestamp: Math.floor(Number(row.timestamp) * 1000), // Convert to milliseconds
+        });
       });
 
       return liquidityMap;
