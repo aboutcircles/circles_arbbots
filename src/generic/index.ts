@@ -565,11 +565,13 @@ class ArbitrageBot {
     }
   }
 
+  // this is inefficient in the sense that it throws away the whole learned graph and then just reloads
+  // the majority of it from the db, however it's a simple way to include new backers and new groups.
   private async resyncGraph() {
-    // @dev: for now we just reinitialise the Graph but down the line
-    // should find ways to not throw away all the cached info
+    console.log("Resyncing graph...");
     this.graph = new DirectedGraph();
     await this.initializeGraph();
+    console.log("Graph resync complete");
   }
 
   public async run(): Promise<void> {
