@@ -105,7 +105,7 @@ const logLiquidityEstimateQuery = `
     "liquidity",
     "price_delta"
   )
-  VALUES (to_timestamp($1), $2, $3, $4, $5, $6)
+  VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7)
 `;
 
 const middlewareContract = new Contract(
