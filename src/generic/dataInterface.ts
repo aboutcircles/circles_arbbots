@@ -41,18 +41,11 @@ import {
   SwapKind,
   Token,
   TokenAmount,
-  Swap,
-  SwapBuildOutputExactOut,
-  SwapBuildCallInput,
-  ExactInQueryOutput,
-  ExactOutQueryOutput,
-  max,
+  Swap
 } from "@balancer/sdk";
 
 import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
-import { CirclesData, CirclesRpc } from "@circles-sdk/data";
 import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
-import { baseGroupAbi } from "./abi/index.js";
 
 // Global config
 const rpcUrl = "https://rpc.gnosischain.com";
@@ -380,6 +373,7 @@ export class DataInterface {
 
       return true;
     } catch (error) {
+      // @todo check `unsupported addressable value` error
       console.error("Error updating middleware trust:", error);
       return false;
     }
@@ -765,6 +759,7 @@ export class DataInterface {
     to: CirclesNode;
     requestedAmount: bigint;
   }) {
+    console.log(params.from, params.to);
     try {
       // we assume that the max flow from the deal findingis still uptodate
       // so we don't actually update this here.
@@ -784,7 +779,6 @@ export class DataInterface {
       }
 
       const maxHolder = await this.getMaxHolder(params.from.avatar);
-
       const buildPath = await this.sdk.v2Pathfinder.getPath(
         maxHolder,
         toAddress,
@@ -794,12 +788,9 @@ export class DataInterface {
         toTokens
       );
 
-      //console.log("Max flow smaller than the required amount");
-      //if(BigInt(buildPath.maxFlow) < BigInt(params.requestedAmount)) return null;
-
       const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
         middlewareAddress,
-        middlewareAddress,
+        middlewareAddress, // @todo check if this is correct
         buildPath.maxFlow,
         buildPath.transfers.map((transfer: any) => {
           return {
@@ -825,16 +816,18 @@ export class DataInterface {
 
   /**
    * Constructs the input parameters for executeSequentialBatchSwaps function
-   * @param {Object} buyQuote - The buy quote similar to sellQuote structure
-   * @param {Object} sellQuote - The sell quote data
+   * @param {Object} trade - trade data
    * @param {Object} pathFlowData - The path flow data
    */
-  private constructExecutionInput(buyQuote: any, sellQuote: any, pathFlowData: any) { // @todo fix type safety
+  private async constructExecutionInput(trade: Trade, demurragedAmount: bigint) {
+    // @todo fix type safety
+    // @todo update comments
     // Validate required parameters
-    if (!buyQuote || !sellQuote) {
+    if (!trade || !demurragedAmount) {
       throw new Error("Missing required parameters");
     }
-
+    const buyQuote:any = trade.buyQuote;
+    const sellQuote:any = trade.sellQuote;
     // Calculate deadline (1 hour from now)
     const deadline = Math.floor(Date.now() / 1000) + 3600;
     // Construct buySwap object
@@ -891,10 +884,25 @@ export class DataInterface {
       deadline: deadline
     };
 
-    // Construct pathFlow object - either from provided data or create a basic one
-    // const pathFlow = pathFlowData || createDefaultPathFlow(buyQuote, sellQuote);
+    // Prepare operateFlowMatrix Data
+    const pathFlow = await this.getPathfinderTransferData({
+      from: trade.buyNode,
+      to: trade.sellNode,
+      requestedAmount: demurragedAmount,
+    });
 
-    return [buySwap, sellSwap, buySwap.assets.indexOf(buyQuote.outputAmount.token.address)];// @todo finish
+    return [
+      buySwap.assets.indexOf(buyQuote.outputAmount.token.address),
+      buySwap,
+      sellSwap,
+      pathFlow ?
+      {
+        flowVertices: pathFlow.flowVertices,
+        flow: pathFlow.flowEdges,
+        streams: pathFlow.streams,
+        packedCoordinates: pathFlow.packedCoordinates
+      } : null
+    ];
   }
 
   // Then modify the executeTrade function:
@@ -911,40 +919,36 @@ export class DataInterface {
         trade.amount,
       );
 
-      // Prepare operateFlowMatrix Data
-      const pathFlow = await this.getPathfinderTransferData({
-        from: trade.buyNode,
-        to: trade.sellNode,
-        requestedAmount: demurragedAmount,
-      });
+      const [
+        buyAssetIndex,
+        buySwapData,
+        sellSwapData,
+        pathFlowData
+      ] = await this.constructExecutionInput(trade, demurragedAmount);
 
-      const [buySwapData, sellSwapData, buyAssetIndex] = this.constructExecutionInput(trade.buyQuote, trade.sellQuote, null);
-      //177608493266592
-      //177608493266592n
-      await this.approveTokens(
+      if(!pathFlowData) {
+        console.log("Path is not found");
+        return false;
+      }
+      // @todo check if `pathFlowData` is not null
+      const currentAllowance = await this.checkAllowance(
         trade.buyQuote.inputAmount.token.address,
-        middlewareAddress,
-        buySwapData.limits[0]
+        wallet.address,
+        middlewareAddress
       );
-      console.log("current allowance: ",
-        await this.checkAllowance(
+
+      if(currentAllowance < buySwapData.limits[0]) {
+        await this.approveTokens(
           trade.buyQuote.inputAmount.token.address,
-          wallet.address,
-          middlewareAddress
-        )
-      )
-      console.log(
-        "bot balance:",
-        await this.getBotERC20Balance(trade.buyQuote.inputAmount.token.address)
-      );
+          middlewareAddress,
+          buySwapData.limits[0]
+        );
+      }
       console.dir({
         buyAssetIndex,
-        buySwapData, sellSwapData, path: {
-          flowVertices: pathFlow.flowVertices,
-          flow: pathFlow.flowEdges,
-          streams: pathFlow.streams,
-          packedCoordinates: pathFlow.packedCoordinates
-        }
+        buySwapData,
+        sellSwapData,
+        pathFlowData
       }, {depth: null});
       //getBotERC20Balance()
       // check the current balance and the required amount
@@ -952,17 +956,11 @@ export class DataInterface {
         buyAssetIndex,
         buySwapData,
         sellSwapData,
-        {
-          flowVertices: pathFlow.flowVertices,
-          flow: pathFlow.flowEdges,
-          streams: pathFlow.streams,
-          packedCoordinates: pathFlow.packedCoordinates
-        }
+        pathFlowData
       );
 
       const receipt = await tx.wait();
-      console.log(receipt)
-      console.log("tx finished!")
+      console.log("Execution finished: ", receipt);
       return receipt.status === 1;
     } catch (error) {
       console.error("Trade execution failed:", error);
