@@ -102,7 +102,8 @@ const logLiquidityEstimateQuery = `
     "target_avatar",
     "source_token",
     "target_token",
-    "liquidity"
+    "liquidity",
+    "price_delta"
   )
   VALUES (to_timestamp($1), $2, $3, $4, $5, $6)
 `;
@@ -373,6 +374,10 @@ export class DataInterface {
           sourceToken: source.erc20tokenAddress,
           targetToken: target.erc20tokenAddress,
           liquidity: estimatedLiquidity,
+          price_delta:
+            !target.price || !source.price
+              ? null
+              : target.price! - source.price!,
         });
       }
 
@@ -733,6 +738,7 @@ export class DataInterface {
     sourceToken: string;
     targetToken: string;
     liquidity: bigint;
+    price_delta: bigint | null;
   }): Promise<void> {
     try {
       const logValues = [
@@ -742,6 +748,7 @@ export class DataInterface {
         params.sourceToken,
         params.targetToken,
         params.liquidity.toString(),
+        params.price_delta?.toString(),
       ];
       await this.loggerClient.query(logLiquidityEstimateQuery, logValues);
     } catch (error) {
