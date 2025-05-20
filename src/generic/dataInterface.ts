@@ -103,9 +103,10 @@ const logLiquidityEstimateQuery = `
     "source_token",
     "target_token",
     "liquidity",
-    "price_delta"
+    "source_price",
+    "target_price"
   )
-  VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7)
+  VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)
 `;
 
 const middlewareContract = new Contract(
@@ -374,10 +375,8 @@ export class DataInterface {
           sourceToken: source.erc20tokenAddress,
           targetToken: target.erc20tokenAddress,
           liquidity: estimatedLiquidity,
-          price_delta:
-            !target.price || !source.price
-              ? null
-              : target.price! - source.price!,
+          sourcePrice: !source.price ? null : source.price,
+          targetPrice: !target.price ? null : target.price,
         });
       }
 
@@ -738,7 +737,8 @@ export class DataInterface {
     sourceToken: string;
     targetToken: string;
     liquidity: bigint;
-    price_delta: bigint | null;
+    sourcePrice: bigint | null;
+    targetPrice: bigint | null;
   }): Promise<void> {
     try {
       const logValues = [
@@ -748,7 +748,8 @@ export class DataInterface {
         params.sourceToken,
         params.targetToken,
         params.liquidity.toString(),
-        params.price_delta?.toString(),
+        params.sourcePrice?.toString(),
+        params.targetPrice?.toString(),
       ];
       await this.loggerClient.query(logLiquidityEstimateQuery, logValues);
     } catch (error) {
