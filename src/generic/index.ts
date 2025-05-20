@@ -325,6 +325,8 @@ class ArbitrageBot {
     const updatedEdgeInfo = await this.updateValues(edgeKey);
 
     console.log("Calculating optimal trade...");
+    // @todo The contract function "queryBatchSwap" reverted with the following reason:
+    // @todo BAL#305
     const optimalTrade = await this.calculateOptimalTrade(
       updatedEdgeInfo.source,
       updatedEdgeInfo.target,
