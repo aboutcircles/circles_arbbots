@@ -88,6 +88,20 @@ const logQuoteInsertQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "o
 
 const logTradeInsertQuery = `INSERT INTO "tradeOpportunties" ("timestamp", "buytoken", "selltoken", "referencetoken", "buyamount", "intermediateamount", "sellamount", "estimatedprofit") VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)`;
 
+const logLiquidityEstimateQuery = `
+  INSERT INTO "liquidity_estimates" (
+    "timestamp",
+    "source_avatar",
+    "target_avatar",
+    "source_token",
+    "target_token",
+    "liquidity",
+    "source_price",
+    "target_price"
+  )
+  VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)
+`;
+
 const middlewareContract = new Contract(
   middlewareAddress,
   middlewareAbi,
@@ -342,10 +356,24 @@ export class DataInterface {
       });
 
       // Convert demurraged to inflationary
-      return await this.convertDemurrageToInflationary(
+      const estimatedLiquidity = await this.convertDemurrageToInflationary(
         target.erc20tokenAddress,
         maxTransferableAmount,
       );
+
+      if (this.logActivity) {
+        await this.logLiquidityEstimate({
+          sourceAvatar: source.avatar,
+          targetAvatar: target.avatar,
+          sourceToken: source.erc20tokenAddress,
+          targetToken: target.erc20tokenAddress,
+          liquidity: estimatedLiquidity,
+          sourcePrice: !source.price ? null : source.price,
+          targetPrice: !target.price ? null : target.price,
+        });
+      }
+
+      return estimatedLiquidity;
     } catch (error) {
       console.error("Error in getSimulatedLiquidity:", error);
       return 0n;
@@ -453,7 +481,53 @@ export class DataInterface {
     return nodes;
   }
 
-  // @dev: function for fetching a historical Price (currently) dummy because no such data source exists.
+  public async fetchLatestLiquidityEstimates(): Promise<
+    Map<string, { liquidity: bigint; timestamp: number }>
+  > {
+    try {
+      const query = `
+        WITH LatestEstimates AS (
+          SELECT
+            source_avatar,
+            target_avatar,
+            liquidity,
+            timestamp,
+            ROW_NUMBER() OVER (
+              PARTITION BY source_avatar, target_avatar
+              ORDER BY timestamp DESC
+            ) as rn
+          FROM liquidity_estimates
+        )
+        SELECT
+          source_avatar,
+          target_avatar,
+          liquidity,
+          EXTRACT(EPOCH FROM timestamp) as timestamp
+        FROM LatestEstimates
+        WHERE rn = 1
+      `;
+
+      const result = await this.loggerClient.query(query);
+
+      const liquidityMap = new Map<
+        string,
+        { liquidity: bigint; timestamp: number }
+      >();
+      result.rows.forEach((row) => {
+        const key = `${row.source_avatar}-${row.target_avatar}`;
+        liquidityMap.set(key, {
+          liquidity: BigInt(row.liquidity),
+          timestamp: Math.floor(Number(row.timestamp) * 1000), // Convert to milliseconds
+        });
+      });
+
+      return liquidityMap;
+    } catch (error) {
+      console.error("Error fetching latest liquidity estimates:", error);
+      return new Map();
+    }
+  }
+
   public async fetchLatestPrices(
     tokenAddresses: string[],
   ): Promise<Map<string, LatestPriceRow | null>> {
@@ -651,6 +725,32 @@ export class DataInterface {
     }
   }
 
+  public async logLiquidityEstimate(params: {
+    sourceAvatar: string;
+    targetAvatar: string;
+    sourceToken: string;
+    targetToken: string;
+    liquidity: bigint;
+    sourcePrice: bigint | null;
+    targetPrice: bigint | null;
+  }): Promise<void> {
+    try {
+      const logValues = [
+        Math.floor(Date.now() / 1000),
+        params.sourceAvatar,
+        params.targetAvatar,
+        params.sourceToken,
+        params.targetToken,
+        params.liquidity.toString(),
+        params.sourcePrice?.toString(),
+        params.targetPrice?.toString(),
+      ];
+      await this.loggerClient.query(logLiquidityEstimateQuery, logValues);
+    } catch (error) {
+      console.error("Error logging liquidity estimate:", error);
+    }
+  }
+
   /**
    * @notice Fetches the latest Balancer swap quote for a token.
    * @param tokenAddress The token address to get a quote for.
@@ -763,7 +863,7 @@ export class DataInterface {
     try {
       // we assume that the max flow from the deal findingis still uptodate
       // so we don't actually update this here.
-      console.log("is group: ", params.to.isGroup)
+      console.log("is group: ", params.to.isGroup);
       const toAddress = params.to.isGroup
         ? params.to.mintHandler!
         : middlewareAddress;
@@ -785,7 +885,7 @@ export class DataInterface {
         params.requestedAmount,
         false,
         [params.from.avatar],
-        toTokens
+        toTokens,
       );
 
       const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
@@ -832,56 +932,58 @@ export class DataInterface {
     const deadline = Math.floor(Date.now() / 1000) + 3600;
     // Construct buySwap object
     const buySwap = {
-      swapKind: buyQuote.swap.swapKind,  // Usually 0 for GIVEN_IN or 1 for GIVEN_OUT
+      swapKind: buyQuote.swap.swapKind, // Usually 0 for GIVEN_IN or 1 for GIVEN_OUT
       swaps: buyQuote.swap.swaps.map((swap: any) => ({
         poolId: swap.poolId,
         assetInIndex: Number(swap.assetInIndex || 0),
         assetOutIndex: Number(swap.assetOutIndex || 0),
         amount: swap.amount.toString(),
-        userData: swap.userData || "0x"
+        userData: swap.userData || "0x",
       })),
       assets: buyQuote.swap.assets,
       funds: {
         sender: middlewareAddress,
         fromInternalBalance: false,
         recipient: middlewareAddress,
-        toInternalBalance: false
+        toInternalBalance: false,
       },
       // Set appropriate limits based on expected amounts
-      limits: buyQuote.swap.assets.map((asset: Address) => { // @todo add profitability to the limit
+      limits: buyQuote.swap.assets.map((asset: Address) => {
+        // @todo add profitability to the limit
         if (asset === buyQuote.inputAmount.token.address) {
-          return (buyQuote.inputAmount.amount * 12n / 10n).toString();
+          return ((buyQuote.inputAmount.amount * 12n) / 10n).toString();
         }
         return "0";
       }),
-      deadline: deadline
+      deadline: deadline,
     };
 
     // Construct sellSwap object
     const sellSwap = {
       swapKind: sellQuote.swap.swapKind,
-      swaps: sellQuote.swap.swaps.map((swap:any) => ({
+      swaps: sellQuote.swap.swaps.map((swap: any) => ({
         poolId: swap.poolId,
         assetInIndex: Number(swap.assetInIndex || 0),
         assetOutIndex: Number(swap.assetOutIndex || 0),
         amount: swap.amount.toString(),
-        userData: swap.userData || "0x"
+        userData: swap.userData || "0x",
       })),
       assets: sellQuote.swap.assets,
       funds: {
         sender: middlewareAddress,
         fromInternalBalance: false,
         recipient: middlewareAddress,
-        toInternalBalance: false
+        toInternalBalance: false,
       },
       // Set appropriate limits based on expected amounts
-      limits: sellQuote.swap.assets.map((asset: Address) => { // @todo these limits are insecure
+      limits: sellQuote.swap.assets.map((asset: Address) => {
+        // @todo these limits are insecure
         if (asset === sellQuote.inputAmount.token.address) {
           return sellQuote.inputAmount.amount.toString();
         }
         return "0";
       }),
-      deadline: deadline
+      deadline: deadline,
     };
 
     // Prepare operateFlowMatrix Data
@@ -905,7 +1007,6 @@ export class DataInterface {
     ];
   }
 
-  // Then modify the executeTrade function:
   async executeWithMiddleware(trade: Trade): Promise<boolean> {
     try {
       const middlewareContract = new Contract(

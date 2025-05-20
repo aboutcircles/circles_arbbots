@@ -518,6 +518,15 @@ async function updateBouncerOrgTrust(tokenAvatar: string): Promise<boolean> {
   }
 }
 
+// Helper function to safely convert to BigInt
+function safeToBigInt(value: number | string): bigint {
+  if (typeof value === "number") {
+    // Convert scientific notation to string with all digits
+    value = value.toLocaleString("fullwide", { useGrouping: false });
+  }
+  return BigInt(value);
+}
+
 /**
  * @notice Calculates the total theoretical amount of tokens that could be available,
  *         combining the bot’s current ERC20 balance, tokens available in wrappable erc1155 form,
@@ -540,22 +549,24 @@ async function theoreticallyAvailableAmountCRC(
   if (!balances) return BigInt(0);
 
   // get the current erc1155 balance (in demurraged units)
-  let erc1155TokenBalance =
+  let erc1155TokenBalance = safeToBigInt(
     balances.find(
       (token: TokenBalanceRow) =>
         token.tokenOwner.toLowerCase() === tokenAvatar &&
         token.version === 2 &&
         token.isErc1155,
-    )?.attoCircles ?? 0;
+    )?.attoCircles ?? 0,
+  );
 
   // get the current erc20 balance (in demurraged units)
-  let erc20TokenBalance =
+  let erc20TokenBalance = safeToBigInt(
     balances.find(
       (token: TokenBalanceRow) =>
         token.tokenOwner.toLowerCase() === tokenAvatar &&
         token.version === 2 &&
         token.isErc20,
-    )?.attoCircles ?? 0;
+    )?.attoCircles ?? 0,
+  );
 
   // find out how many tokens we can turn to the target token via the pathfinder, excluding the existing target balances
   const remainingTokens = balances

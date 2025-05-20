@@ -18,7 +18,7 @@ const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
 const EXPLORATION_RATE = 0.1;
 const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
 const PROFIT_THRESHOLD = BigInt(3e13); // profit threshold, should be denominated in the colalteral curreny
-const RESYNC_INTERVAL = 1000 * 60 * 60; // Resync every 60 minutes
+const RESYNC_INTERVAL = 1000 * 60 * 15; // Resync every 60 minutes
 const DEFAULT_PRICE_REF_ADDRESS =
   "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b".toLowerCase() as Address; // METRI TEST SUPERGROUP
 const TRADING_TOKEN =
@@ -117,16 +117,24 @@ class ArbitrageBot {
       this.graph.addNode(node.avatar, node);
     }
 
-    // 8. Create complete graph with initial zero liquidity
+    // 8. Fetch latest liquidity estimates from database
+    console.log("Fetching historical liquidity estimates...");
+    const latestLiquidityEstimates =
+      await this.dataInterface.fetchLatestLiquidityEstimates();
+
+    // 9. Create complete graph with initial liquidity from historical data or zero
     console.log(`Creating edges between ${nodes.length} nodes...`);
     let edgeCount = 0;
     for (const sourceNode of nodes) {
       for (const targetNode of nodes) {
         if (sourceNode === targetNode) continue;
 
+        const historicalKey = `${sourceNode.avatar}-${targetNode.avatar}`;
+        const historicalData = latestLiquidityEstimates.get(historicalKey);
+
         this.graph.addEdge(sourceNode.avatar, targetNode.avatar, {
-          liquidity: BigInt(0),
-          lastUpdated: Date.now(),
+          liquidity: historicalData ? historicalData.liquidity : BigInt(0),
+          lastUpdated: historicalData ? historicalData.timestamp : Date.now(),
         });
         edgeCount++;
         if (edgeCount % 1000 === 0) {
@@ -135,59 +143,62 @@ class ArbitrageBot {
       }
     }
 
-    // 9. Calculate and update actual liquidity for edges
-    console.log("Calculating edge liquidity...");
+    // 10. Calculate and update liquidity only for edges without historical data
+    console.log("Calculating missing edge liquidity...");
     for (const sourceNode of nodes) {
       for (const targetNode of nodes) {
         if (sourceNode === targetNode) continue;
 
-        let relevantBalances: BalanceRow[] = [];
-        if (targetNode.isGroup) {
-          // For group targets, get balances of all group members
-          const groupMembers = groupMemberRelations.filter(
-            (rel) => rel.truster === targetNode.avatar,
-          );
-          groupMembers.forEach((member) => {
-            const memberBalances = balancesByAccount.get(member.trustee) || [];
-            relevantBalances.push(...memberBalances);
-          });
-        } else {
-          relevantBalances = balancesByAccount.get(targetNode.avatar) || [];
-        }
+        const historicalKey = `${sourceNode.avatar}-${targetNode.avatar}`;
+        if (!latestLiquidityEstimates.has(historicalKey)) {
+          // Calculate new liquidity estimate only if no historical data exists
+          let relevantBalances: BalanceRow[] = [];
+          if (targetNode.isGroup) {
+            const groupMembers = groupMemberRelations.filter(
+              (rel) => rel.truster === targetNode.avatar,
+            );
+            groupMembers.forEach((member) => {
+              const memberBalances =
+                balancesByAccount.get(member.trustee) || [];
+              relevantBalances.push(...memberBalances);
+            });
+          } else {
+            relevantBalances = balancesByAccount.get(targetNode.avatar) || [];
+          }
 
-        let relevantTrustRelations: TrustRelationRow[] = [];
-        if (sourceNode.isGroup) {
-          // For group sources, get trust relations for all group members
-          const groupMembers = groupMemberRelations.filter(
-            (rel) => rel.truster === sourceNode.avatar,
-          );
-          groupMembers.forEach((member) => {
-            const memberTrusts =
-              trustRelationsByTrustee.get(member.trustee) || [];
-            relevantTrustRelations.push(...memberTrusts);
-          });
-        } else {
-          relevantTrustRelations =
-            trustRelationsByTrustee.get(sourceNode.avatar) || [];
-        }
+          let relevantTrustRelations: TrustRelationRow[] = [];
+          if (sourceNode.isGroup) {
+            const groupMembers = groupMemberRelations.filter(
+              (rel) => rel.truster === sourceNode.avatar,
+            );
+            groupMembers.forEach((member) => {
+              const memberTrusts =
+                trustRelationsByTrustee.get(member.trustee) || [];
+              relevantTrustRelations.push(...memberTrusts);
+            });
+          } else {
+            relevantTrustRelations =
+              trustRelationsByTrustee.get(sourceNode.avatar) || [];
+          }
 
-        // Calculate total liquidity
-        let totalLiquidity = BigInt(0);
-        for (const balance of relevantBalances) {
-          for (const trust of relevantTrustRelations) {
-            if (balance.account === trust.truster) {
-              totalLiquidity += balance.demurragedTotalBalance;
+          // Calculate total liquidity
+          let totalLiquidity = BigInt(0);
+          for (const balance of relevantBalances) {
+            for (const trust of relevantTrustRelations) {
+              if (balance.account === trust.truster) {
+                totalLiquidity += balance.demurragedTotalBalance;
+              }
             }
           }
-        }
 
-        // Update edge liquidity if there is any
-        if (totalLiquidity > 0n) {
-          this.graph.updateEdgeAttribute(
-            this.graph.edge(sourceNode.avatar, targetNode.avatar),
-            "liquidity",
-            () => totalLiquidity,
-          );
+          // Update edge liquidity if there is any
+          if (totalLiquidity > 0n) {
+            this.graph.updateEdgeAttribute(
+              this.graph.edge(sourceNode.avatar, targetNode.avatar),
+              "liquidity",
+              () => totalLiquidity,
+            );
+          }
         }
       }
     }
@@ -475,7 +486,7 @@ class ArbitrageBot {
     const initialSellQuote = await this.dataInterface.getTradingQuote({
       tokenAddress: target.erc20tokenAddress,
       direction: Direction.SELL,
-      amount: currentAmount * 999n / 1000n,
+      amount: (currentAmount * 999n) / 1000n,
     });
 
     if (
@@ -513,7 +524,7 @@ class ArbitrageBot {
       const sellQuote = await this.dataInterface.getTradingQuote({
         tokenAddress: target.erc20tokenAddress,
         direction: Direction.SELL,
-        amount: currentAmount * 999n / 1000n,
+        amount: (currentAmount * 999n) / 1000n,
       });
 
       if (!buyQuote || !sellQuote) {
@@ -546,41 +557,8 @@ class ArbitrageBot {
   }
 
   async executeTrade(trade: Trade): Promise<boolean> {
-    // const options: SwapExecutionOptions = {
-    //   slippage: 0.1,
-    //   maxRetries: 10,
-    //   retryDelay: 2000,
-    // };
-
     try {
-      // Execute main trade
-      //
       const result = await this.dataInterface.executeWithMiddleware(trade);
-
-      // const result = await this.dataInterface.executeCompleteTrade({
-      //   buyNode: trade.buyNode,
-      //   sellNode: trade.sellNode,
-      //   buyQuote: trade.buyQuote,
-      //   initialAmount: trade.amount,
-      //   options,
-      // });
-
-      // Always attempt cleanup regardless of main trade result
-      // try {
-      //   // await Promise.all([
-      //   //   this.dataInterface.cleanupToken(trade.buyNode.erc20tokenAddress, {
-      //   //     ...options,
-      //   //     slippage: 1.0, // Higher slippage for cleanup
-      //   //   }),
-      //   //   this.dataInterface.cleanupToken(trade.sellNode.erc20tokenAddress, {
-      //   //     ...options,
-      //   //     slippage: 1.0,
-      //   //   }),
-      //   // ]);
-      //   console.log("Skipping cleanup");
-      // } catch (cleanupError) {
-      //   console.error("Cleanup failed:", cleanupError);
-      // }
 
       return result;
     } catch (error) {
@@ -589,11 +567,13 @@ class ArbitrageBot {
     }
   }
 
+  // this is inefficient in the sense that it throws away the whole learned graph and then just reloads
+  // the majority of it from the db, however it's a simple way to include new backers and new groups.
   private async resyncGraph() {
-    // @dev: for now we just reinitialise the Graph but down the line
-    // should find ways to not throw away all the cached info
+    console.log("Resyncing graph...");
     this.graph = new DirectedGraph();
     await this.initializeGraph();
+    console.log("Graph resync complete");
   }
 
   public async run(): Promise<void> {
