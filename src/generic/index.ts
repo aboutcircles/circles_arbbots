@@ -17,8 +17,8 @@ const LOG_ACTIVITY = true;
 const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
 const EXPLORATION_RATE = 0.1;
 const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
-const PROFIT_THRESHOLD = BigInt(3e13); // profit threshold, should be denominated in the colalteral curreny
-const RESYNC_INTERVAL = 1000 * 60 * 15; // Resync every 60 minutes
+const PROFIT_THRESHOLD = BigInt(1e12); // profit threshold, should be denominated in the colalteral curreny
+const RESYNC_INTERVAL = 1000 * 60 * 60; // Resync every 60 minutes
 const DEFAULT_PRICE_REF_ADDRESS =
   "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b".toLowerCase() as Address; // METRI TEST SUPERGROUP
 const TRADING_TOKEN =
