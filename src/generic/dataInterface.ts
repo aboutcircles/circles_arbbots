@@ -56,7 +56,7 @@ const SELLOFF_PRECISION = BigInt(1e12);
 
 // Constant addresses
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
-const middlewareAddress = "0x6C301FCe295c0524dd1FEeFF4eF2e43Fc5e7648d";
+const middlewareAddress = "0x36fad3df6d61060f285061f74d26eab2b514addb";
 
 /**
  * @notice Initializes core blockchain objects.
@@ -633,7 +633,6 @@ export class DataInterface {
       18,
       "Target Token",
     );
-
     return this.fetchBalancerQuote({
       tokenIn: this.quotingToken,
       tokenOut: targetToken,
@@ -805,6 +804,7 @@ export class DataInterface {
       console.log("No path found");
       return null;
     }
+
     // Swap object provides useful helpers for re-querying, building call, etc
     const swap = new Swap({
       chainId,
@@ -833,8 +833,7 @@ export class DataInterface {
         console.error(error?.shortMessage);
         return null;
       });
-
-    return result;
+      return result;
   }
 
   /**
@@ -859,17 +858,15 @@ export class DataInterface {
     to: CirclesNode;
     requestedAmount: bigint;
   }) {
-    console.log(params.from, params.to);
     try {
       // we assume that the max flow from the deal findingis still uptodate
       // so we don't actually update this here.
-      console.log("is group: ", params.to.isGroup);
       const toAddress = params.to.isGroup
         ? params.to.mintHandler!
         : middlewareAddress;
-      const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
+      const toTokens =  params.to.isGroup ? undefined : [params.to.avatar];
 
-      if (!params.to.isGroup) {
+      if(!params.to.isGroup) {
         console.log("Forcing trust for ", params.to.avatar);
         const trustUpdated = await this.updateMiddlewareTrust(params.to.avatar);
         if (!trustUpdated) {
@@ -879,18 +876,19 @@ export class DataInterface {
       }
 
       const maxHolder = await this.getMaxHolder(params.from.avatar);
+
       const buildPath = await this.sdk.v2Pathfinder.getPath(
         maxHolder,
         toAddress,
         params.requestedAmount,
         false,
         [params.from.avatar],
-        toTokens,
+        toTokens
       );
 
       const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
         middlewareAddress,
-        middlewareAddress, // @todo check if this is correct
+        toAddress, // @todo check if this is correct
         buildPath.maxFlow,
         buildPath.transfers.map((transfer: any) => {
           return {
@@ -951,7 +949,7 @@ export class DataInterface {
       limits: buyQuote.swap.assets.map((asset: Address) => {
         // @todo add profitability to the limit
         if (asset === buyQuote.inputAmount.token.address) {
-          return ((buyQuote.inputAmount.amount * 12n) / 10n).toString();
+          return (buyQuote.inputAmount.amount * 115n / 100n).toString();
         }
         return "0";
       }),
@@ -1037,22 +1035,15 @@ export class DataInterface {
         wallet.address,
         middlewareAddress
       );
-
-      if(currentAllowance < buySwapData.limits[0]) {
+      // check the current balance and the required amount
+      if(currentAllowance < buySwapData.limits[0] && pathFlowData) {
         await this.approveTokens(
           trade.buyQuote.inputAmount.token.address,
           middlewareAddress,
           buySwapData.limits[0]
         );
       }
-      console.dir({
-        buyAssetIndex,
-        buySwapData,
-        sellSwapData,
-        pathFlowData
-      }, {depth: null});
-      //getBotERC20Balance()
-      // check the current balance and the required amount
+
       const tx = await middlewareContract.executeSequentialBatchSwaps(
         buyAssetIndex,
         buySwapData,
@@ -1063,8 +1054,26 @@ export class DataInterface {
       const receipt = await tx.wait();
       console.log("Execution finished: ", receipt);
       return receipt.status === 1;
-    } catch (error) {
-      console.error("Trade execution failed:", error);
+    } catch (error: any) {
+      const errorData = error.data || error.error?.data;
+      if (error.code === 'CALL_EXCEPTION' && errorData) {
+        // Get the contract interface for parsing
+        const contractInterface = new ethers.Interface(middlewareAbi);
+        // Parse the error data with the ABI
+        const decodedError = contractInterface.parseError(errorData);
+        if(decodedError?.name) {
+          console.error("Trade execution reverted: ", decodedError.name);
+        } else {
+          console.error("Trade execution reverted: UnknownCustomError");
+        }
+      } else {
+        console.error("Trade execution failed");
+        if(error?.transaction?.data) {
+          console.error("Calldata: ", error?.transaction?.data)
+        } else {
+          console.error(error);
+        }
+      }
       return false;
     }
   }
