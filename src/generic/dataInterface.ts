@@ -117,6 +117,9 @@ export class DataInterface {
   public logActivity: boolean;
   public sdk?: Sdk;
   public sdkAvatar?: Avatar;
+  private tradingToQuoteRate: bigint | null = null;
+  private lastRateUpdate: number = 0;
+  private readonly RATE_UPDATE_INTERVAL = 60000; // 1 minute
 
   constructor(params: DataInterfaceParams) {
     this.client = new pg.Client({
@@ -694,6 +697,13 @@ export class DataInterface {
     });
   }
 
+  private async convertTradingToQuoteAmount(
+    tradingAmount: bigint,
+  ): Promise<bigint> {
+    const rate = await this.updateTradingToQuoteRate();
+    return (tradingAmount * rate) / BigInt(this.tradingToken.decimals);
+  }
+
   /**
    * @notice Logs a trade opportunity to the database
    * @param tradeOpportunity The trade opportunity to log
@@ -708,6 +718,10 @@ export class DataInterface {
     estimatedProfit: bigint;
   }): Promise<void> {
     try {
+      const profitInQuoteToken = await this.convertTradingToQuoteAmount(
+        params.estimatedProfit,
+      );
+
       const logValues = [
         Math.floor(Date.now() / 1000),
         params.buyToken,
@@ -716,7 +730,7 @@ export class DataInterface {
         params.buyAmount.toString(),
         params.intermediateAmount.toString(),
         params.sellAmount.toString(),
-        params.estimatedProfit.toString(),
+        profitInQuoteToken.toString(),
       ];
       await this.loggerClient.query(logTradeInsertQuery, logValues);
     } catch (error) {
@@ -1154,5 +1168,39 @@ export class DataInterface {
       );
 
     return inflationaryValue;
+  }
+
+  private async updateTradingToQuoteRate(): Promise<bigint> {
+    const currentTime = Date.now();
+
+    // Return cached rate if it's fresh enough
+    if (
+      this.tradingToQuoteRate !== null &&
+      currentTime - this.lastRateUpdate < this.RATE_UPDATE_INTERVAL
+    ) {
+      return this.tradingToQuoteRate;
+    }
+
+    // Fetch new rate using balancer quote
+    const quote = await this.fetchBalancerQuote({
+      tokenIn: this.tradingToken,
+      tokenOut: this.quotingToken,
+      direction: Direction.SELL,
+      amount: BigInt(10 ** this.tradingToken.decimals), // Use 1 full unit of trading token as reference
+      logQuote: false, // Don't log these routine price checks
+    });
+
+    if (!quote) {
+      // If we can't get a new quote but have an old rate, use that
+      if (this.tradingToQuoteRate !== null) {
+        return this.tradingToQuoteRate;
+      }
+      throw new Error("Failed to fetch trading to quote token rate");
+    }
+
+    this.tradingToQuoteRate = quote.outputAmount.amount;
+    this.lastRateUpdate = currentTime;
+
+    return this.tradingToQuoteRate;
   }
 }
