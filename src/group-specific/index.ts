@@ -568,15 +568,6 @@ async function theoreticallyAvailableAmountCRC(
     )?.attoCircles ?? 0,
   );
 
-  // find out how many tokens we can turn to the target token via the pathfinder, excluding the existing target balances
-  const remainingTokens = balances
-    .map((b: TokenBalanceRow) => b.tokenAddress.toLowerCase())
-    .filter(
-      (address: string) =>
-        address !== tokenAddress.toLowerCase() &&
-        address !== tokenAvatar.toLowerCase(),
-    );
-
   let toAddress;
   let toTokens;
 
@@ -593,8 +584,9 @@ async function theoreticallyAvailableAmountCRC(
     toAddress,
     undefined,
     true,
-    remainingTokens,
+    undefined,
     toTokens,
+    [tokenAddress.toLowerCase(), tokenAvatar.toLowerCase()],
   );
 
   const pullableAmountString = (maxTransferable * 1e18).toFixed(0);
@@ -859,14 +851,6 @@ async function requireTokens(
     const roundedAmountToPull =
       ((amountToPull + sigFigs - BigInt(1)) / sigFigs) * sigFigs;
 
-    const remainingTokens = balances
-      .map((b: TokenBalanceRow) => b.tokenAddress.toLowerCase())
-      .filter(
-        (address: string) =>
-          address !== tokenAddress.toLowerCase() &&
-          address !== tokenAvatar.toLowerCase(),
-      );
-
     let toAddress;
     let toTokens;
 
@@ -882,7 +866,6 @@ async function requireTokens(
       console.log(`
         toAddress: ${toAddress},
         roundedAmountToPull: ${roundedAmountToPull},
-        remainingTokens: ${remainingTokens},
         toTokens: ${toTokens}
       `);
       const transferReceipt = await arbBot.avatar.transfer(
@@ -891,8 +874,9 @@ async function requireTokens(
         undefined,
         undefined,
         true,
-        remainingTokens,
+        undefined,
         toTokens,
+        [tokenAddress.toLowerCase(), tokenAvatar.toLowerCase()],
       );
       if (!transferReceipt || transferReceipt.status === 0) {
         console.error("Transfer failed");

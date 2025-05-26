@@ -41,7 +41,7 @@ import {
   SwapKind,
   Token,
   TokenAmount,
-  Swap
+  Swap,
 } from "@balancer/sdk";
 
 import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
@@ -617,7 +617,7 @@ export class DataInterface {
    * @return {Promise<bigint>} A promise that resolves to the token balance as a bigint.
    */
   public async getTradingTokenBalance(): Promise<bigint> {
-    return await this.getBotERC20Balance(this.tradingToken.address);
+    return await this.getBotERC20Balance(this.tradingToken.address as Address);
   }
 
   public async getBotERC20Balance(tokenAddress: Address): Promise<bigint> {
@@ -847,7 +847,7 @@ export class DataInterface {
         console.error(error?.shortMessage);
         return null;
       });
-      return result;
+    return result;
   }
 
   /**
@@ -878,9 +878,9 @@ export class DataInterface {
       const toAddress = params.to.isGroup
         ? params.to.mintHandler!
         : middlewareAddress;
-      const toTokens =  params.to.isGroup ? undefined : [params.to.avatar];
+      const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
 
-      if(!params.to.isGroup) {
+      if (!params.to.isGroup) {
         console.log("Forcing trust for ", params.to.avatar);
         const trustUpdated = await this.updateMiddlewareTrust(params.to.avatar);
         if (!trustUpdated) {
@@ -897,7 +897,7 @@ export class DataInterface {
         params.requestedAmount,
         false,
         [params.from.avatar],
-        toTokens
+        toTokens,
       );
 
       const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
@@ -931,15 +931,18 @@ export class DataInterface {
    * @param {Object} trade - trade data
    * @param {Object} pathFlowData - The path flow data
    */
-  private async constructExecutionInput(trade: Trade, demurragedAmount: bigint) {
+  private async constructExecutionInput(
+    trade: Trade,
+    demurragedAmount: bigint,
+  ) {
     // @todo fix type safety
     // @todo update comments
     // Validate required parameters
     if (!trade || !demurragedAmount) {
       throw new Error("Missing required parameters");
     }
-    const buyQuote:any = trade.buyQuote;
-    const sellQuote:any = trade.sellQuote;
+    const buyQuote: any = trade.buyQuote;
+    const sellQuote: any = trade.sellQuote;
     // Calculate deadline (1 hour from now)
     const deadline = Math.floor(Date.now() / 1000) + 3600;
     // Construct buySwap object
@@ -963,7 +966,7 @@ export class DataInterface {
       limits: buyQuote.swap.assets.map((asset: Address) => {
         // @todo add profitability to the limit
         if (asset === buyQuote.inputAmount.token.address) {
-          return (buyQuote.inputAmount.amount * 115n / 100n).toString();
+          return ((buyQuote.inputAmount.amount * 115n) / 100n).toString();
         }
         return "0";
       }),
@@ -1009,13 +1012,14 @@ export class DataInterface {
       buySwap.assets.indexOf(buyQuote.outputAmount.token.address),
       buySwap,
       sellSwap,
-      pathFlow ?
-      {
-        flowVertices: pathFlow.flowVertices,
-        flow: pathFlow.flowEdges,
-        streams: pathFlow.streams,
-        packedCoordinates: pathFlow.packedCoordinates
-      } : null
+      pathFlow
+        ? {
+            flowVertices: pathFlow.flowVertices,
+            flow: pathFlow.flowEdges,
+            streams: pathFlow.streams,
+            packedCoordinates: pathFlow.packedCoordinates,
+          }
+        : null,
     ];
   }
 
@@ -1032,14 +1036,10 @@ export class DataInterface {
         trade.amount,
       );
 
-      const [
-        buyAssetIndex,
-        buySwapData,
-        sellSwapData,
-        pathFlowData
-      ] = await this.constructExecutionInput(trade, demurragedAmount);
+      const [buyAssetIndex, buySwapData, sellSwapData, pathFlowData] =
+        await this.constructExecutionInput(trade, demurragedAmount);
 
-      if(!pathFlowData) {
+      if (!pathFlowData) {
         console.log("Path is not found");
         return false;
       }
@@ -1047,14 +1047,14 @@ export class DataInterface {
       const currentAllowance = await this.checkAllowance(
         trade.buyQuote.inputAmount.token.address,
         wallet.address,
-        middlewareAddress
+        middlewareAddress,
       );
       // check the current balance and the required amount
-      if(currentAllowance < buySwapData.limits[0] && pathFlowData) {
+      if (currentAllowance < buySwapData.limits[0] && pathFlowData) {
         await this.approveTokens(
           trade.buyQuote.inputAmount.token.address,
           middlewareAddress,
-          buySwapData.limits[0]
+          buySwapData.limits[0],
         );
       }
 
@@ -1062,7 +1062,7 @@ export class DataInterface {
         buyAssetIndex,
         buySwapData,
         sellSwapData,
-        pathFlowData
+        pathFlowData,
       );
 
       const receipt = await tx.wait();
@@ -1070,20 +1070,20 @@ export class DataInterface {
       return receipt.status === 1;
     } catch (error: any) {
       const errorData = error.data || error.error?.data;
-      if (error.code === 'CALL_EXCEPTION' && errorData) {
+      if (error.code === "CALL_EXCEPTION" && errorData) {
         // Get the contract interface for parsing
         const contractInterface = new ethers.Interface(middlewareAbi);
         // Parse the error data with the ABI
         const decodedError = contractInterface.parseError(errorData);
-        if(decodedError?.name) {
+        if (decodedError?.name) {
           console.error("Trade execution reverted: ", decodedError.name);
         } else {
           console.error("Trade execution reverted: UnknownCustomError");
         }
       } else {
         console.error("Trade execution failed");
-        if(error?.transaction?.data) {
-          console.error("Calldata: ", error?.transaction?.data)
+        if (error?.transaction?.data) {
+          console.error("Calldata: ", error?.transaction?.data);
         } else {
           console.error(error);
         }
