@@ -28,6 +28,60 @@ module.exports = {
       },
     },
     {
+      // MC Satellite Group Instance
+      name: "arbbot_satellite",
+      script: "dist/group-specific/index.js",
+      instances: 1,
+      exec_mode: "fork",
+      node_args: "--env-file env_files/.env.satellite",
+
+      // Restart settings
+      max_restarts: 20,
+      min_uptime: "30s",
+      restart_delay: 1000,
+      exp_backoff_restart_delay: 50,
+
+      // Resource management
+      max_memory_restart: "2G",
+      kill_timeout: 5000,
+
+      // Logging
+      error_file: "logs/satellite-error.log",
+      out_file: "logs/staellite-out.log",
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
+      // Dappcon25 Group Instance
+      name: "arbbot_dappcon",
+      script: "dist/group-specific/index.js",
+      instances: 1,
+      exec_mode: "fork",
+      node_args: "--env-file env_files/.env.dappcon",
+
+      // Restart settings
+      max_restarts: 20,
+      min_uptime: "30s",
+      restart_delay: 1000,
+      exp_backoff_restart_delay: 50,
+
+      // Resource management
+      max_memory_restart: "2G",
+      kill_timeout: 5000,
+
+      // Logging
+      error_file: "logs/dappcon-error.log",
+      out_file: "logs/dappcon-out.log",
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
       // KPK Group Instance
       name: "arbbot_kpk",
       script: "dist/group-specific/index.js",
