@@ -462,7 +462,13 @@ export class DataInterface {
         erc20tokenAddress: tokenAddress! as Address, // we know the tokenAddress must exist, since backing requires wrapping.
         lastUpdated: Date.now(),
       };
-      nodes.push(node);
+
+      const referencePrice = (await this.getSpotPrice(
+        tokenAddress! as Address,
+      ));
+
+      if(!!referencePrice)
+        nodes.push(node);
     }
 
     // we then simply load all basegroups with an ERC20 token (as I currently don't have a simple way to tell which ones have liquidity)
@@ -478,7 +484,13 @@ export class DataInterface {
         mintHandler: group.mintHandler,
         lastUpdated: Date.now(),
       };
-      nodes.push(node);
+
+      const referencePrice = (await this.getSpotPrice(
+        tokenAddress! as Address,
+      ));
+
+      if(!!referencePrice)
+        nodes.push(node);
     }
     if (limit) return nodes.slice(0, limit);
     return nodes;
@@ -894,7 +906,7 @@ export class DataInterface {
       const buildPath = await this.sdk.v2Pathfinder.getPath(
         maxHolder,
         toAddress,
-        params.requestedAmount,
+        params.requestedAmount.toString(),
         false,
         [params.from.avatar],
         toTokens,
