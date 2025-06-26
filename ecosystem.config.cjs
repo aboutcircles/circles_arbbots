@@ -2,6 +2,33 @@ module.exports = {
   apps: [
     {
       // Astronauts Group Instance
+      name: "arbbot_ethcc",
+      script: "dist/group-specific/index.js",
+      instances: 1,
+      exec_mode: "fork",
+      node_args: "--env-file env_files/.env.ethcc",
+
+      // Restart settings
+      max_restarts: 20,
+      min_uptime: "30s",
+      restart_delay: 1000,
+      exp_backoff_restart_delay: 50,
+
+      // Resource management
+      max_memory_restart: "2G",
+      kill_timeout: 5000,
+
+      // Logging
+      error_file: "logs/ethc-error.log",
+      out_file: "logs/ethc-out.log",
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
+      // Astronauts Group Instance
       name: "arbbot_astronauts",
       script: "dist/group-specific/index.js",
       instances: 1,
