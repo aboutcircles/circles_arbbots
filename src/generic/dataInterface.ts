@@ -48,11 +48,13 @@ import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
 import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
 
 // Global config
-const rpcUrl = "https://rpc.gnosischain.com";
+const rpcUrl = process.env.RPC_URL;
 const DemurragedVSInflation = 1;
 const chainId = ChainId.GNOSIS_CHAIN;
 const botPrivateKey = process.env.PRIVATE_KEY!;
-const SELLOFF_PRECISION = BigInt(1e12);
+// @todo share this among two files
+const PROFIT_THRESHOLD = BigInt(1e12); // profit threshold, should be denominated in the colalteral curreny
+
 
 // Constant addresses
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
@@ -69,7 +71,14 @@ const wallet = new Wallet(botPrivateKey, provider);
 /**
  * @notice Balancer API instance used to fetch swap paths and quotes.
  */
-const balancerApi = new BalancerApi("https://api-v3.balancer.fi/", chainId);
+const balancerApi = new BalancerApi(
+  "https://api-v3.balancer.fi/",
+  chainId,
+  {
+    clientName: process.env.BALANCER_SDK_CLIENT_NAME,
+    clientVersion: process.env.BALANCER_SDK_CLIENT_VERSION
+  }
+);
 
 /**
  * @notice Circles SDK configuration objects.
@@ -462,21 +471,25 @@ export class DataInterface {
         erc20tokenAddress: tokenAddress! as Address, // we know the tokenAddress must exist, since backing requires wrapping.
         lastUpdated: Date.now(),
       };
-
-      const referencePrice = (await this.getSpotPrice(
-        tokenAddress! as Address,
-      ));
-
-      if(!!referencePrice)
-        nodes.push(node);
+      nodes.push(node);
     }
 
     // we then simply load all basegroups with an ERC20 token (as I currently don't have a simple way to tell which ones have liquidity)
     const baseGroups = await this.getBaseGroups();
     for (const group of baseGroups) {
+      // @todo check if there is such token in the balancer vault
       // const isGroup = await this.checkIsGroup(group as string);
       const tokenAddress = await this.getERC20Token(group.address);
       if (!tokenAddress) continue;
+      // @todo move to const
+      const balancerVaultV2Balance = await this.getERC20Balance(tokenAddress as Address, "0xBA12222222228d8Ba445958a75a0704d566BF2C8");
+      // @todo extend support for v3 in the future
+      if (!balancerVaultV2Balance) {
+        console.log("the group skipped: ", group.address)
+        continue;
+      } else {
+        console.log("group not skipped: ", group.address)
+      }
       const node: CirclesNode = {
         avatar: group.address,
         isGroup: true,
@@ -484,13 +497,7 @@ export class DataInterface {
         mintHandler: group.mintHandler,
         lastUpdated: Date.now(),
       };
-
-      const referencePrice = (await this.getSpotPrice(
-        tokenAddress! as Address,
-      ));
-
-      if(!!referencePrice)
-        nodes.push(node);
+      nodes.push(node);
     }
     if (limit) return nodes.slice(0, limit);
     return nodes;
@@ -629,15 +636,15 @@ export class DataInterface {
    * @return {Promise<bigint>} A promise that resolves to the token balance as a bigint.
    */
   public async getTradingTokenBalance(): Promise<bigint> {
-    return await this.getBotERC20Balance(this.tradingToken.address as Address);
+    return await this.getERC20Balance(this.tradingToken.address as Address, wallet.address as Address);
   }
 
-  public async getBotERC20Balance(tokenAddress: Address): Promise<bigint> {
+  public async getERC20Balance(tokenAddress: Address, holder: Address): Promise<bigint> {
     // Create a contract instance for the token
     const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
 
     // Fetch the balance
-    let balance = await tokenContract.balanceOf(wallet.address);
+    let balance = await tokenContract.balanceOf(holder);
     return balance;
   }
 
@@ -663,7 +670,7 @@ export class DataInterface {
     delayMs: number = 2000,
   ): Promise<bigint> {
     for (let i = 0; i < maxRetries; i++) {
-      const balance = await this.getBotERC20Balance(tokenAddress);
+      const balance = await this.getERC20Balance(tokenAddress, wallet.address as Address);
       if (balance > 0n) {
         return balance;
       }
@@ -812,7 +819,7 @@ export class DataInterface {
     const sorPaths = await balancerApi.sorSwapPaths
       .fetchSorSwapPaths(pathInput)
       .catch(() => {
-        console.error("ERROR: Swap path not found");
+        console.error("ERROR: Swap path not found: ");
       });
 
     // if there is no path, we return null
@@ -827,7 +834,7 @@ export class DataInterface {
         ];
         await this.loggerClient.query(logQuoteInsertQuery, logValues);
       }
-      console.log("No path found");
+      console.log("No swap path found");
       return null;
     }
 
@@ -894,6 +901,7 @@ export class DataInterface {
 
       if (!params.to.isGroup) {
         console.log("Forcing trust for ", params.to.avatar);
+        // @todo rework logic to trust during the sc call
         const trustUpdated = await this.updateMiddlewareTrust(params.to.avatar);
         if (!trustUpdated) {
           console.log("Failed to update middleware trust relationships");
@@ -930,7 +938,7 @@ export class DataInterface {
       return theFlow;
     } catch (error: unknown) {
       if (error instanceof Error) {
-        console.error("Error in flowData generation:", error.message);
+        console.error("Error in flowData generation:", error);
       } else {
         console.error("Error in flowData generation:", error);
       }
@@ -941,7 +949,7 @@ export class DataInterface {
   /**
    * Constructs the input parameters for executeSequentialBatchSwaps function
    * @param {Object} trade - trade data
-   * @param {Object} pathFlowData - The path flow data
+   * @param {Object} demurragedAmount - The amount of demurraged crc
    */
   private async constructExecutionInput(
     trade: Trade,
@@ -978,7 +986,7 @@ export class DataInterface {
       limits: buyQuote.swap.assets.map((asset: Address) => {
         // @todo add profitability to the limit
         if (asset === buyQuote.inputAmount.token.address) {
-          return ((buyQuote.inputAmount.amount * 115n) / 100n).toString();
+          return (buyQuote.inputAmount.amount + PROFIT_THRESHOLD).toString();
         }
         return "0";
       }),
@@ -1066,7 +1074,7 @@ export class DataInterface {
         await this.approveTokens(
           trade.buyQuote.inputAmount.token.address,
           middlewareAddress,
-          buySwapData.limits[0],
+          BigInt(1e18) // Setup extremely huge allowance to avoid redundunt tx
         );
       }
 
