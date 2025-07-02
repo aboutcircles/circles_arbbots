@@ -377,10 +377,28 @@ class ArbitrageBot {
       ": ",
       currentTargetPrice,
     );
+
+    this.graph.updateNodeAttributes(edgeInfo.sourceKey, (attr) => {
+      return {
+        ...attr,
+        price: currentSourcePrice,
+        lastUpdated: Date.now(),
+      };
+    });
+
+    this.graph.updateNodeAttributes(edgeInfo.targetKey, (attr) => {
+      return {
+        ...attr,
+        price: currentTargetPrice,
+        lastUpdated: Date.now(),
+      };
+    });
+
     const currentEdgeLiquidity = await this.getCurrentLiquidity(
       edgeInfo.source,
       edgeInfo.target,
     );
+
     console.log(
       "Updated liquidity between:",
       edgeInfo.source.avatar,
@@ -395,22 +413,6 @@ class ArbitrageBot {
       return {
         ...attr,
         liquidity: currentEdgeLiquidity,
-        lastUpdated: Date.now(),
-      };
-    });
-
-    this.graph.updateNodeAttributes(edgeInfo.sourceKey, (attr) => {
-      return {
-        ...attr,
-        price: currentSourcePrice,
-        lastUpdated: Date.now(),
-      };
-    });
-
-    this.graph.updateNodeAttributes(edgeInfo.targetKey, (attr) => {
-      return {
-        ...attr,
-        price: currentTargetPrice,
         lastUpdated: Date.now(),
       };
     });
