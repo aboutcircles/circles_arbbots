@@ -224,7 +224,7 @@ class ArbitrageBot {
     const edgeInfo = this.getEdgeInfo(edgeKey);
 
     // the logic is an estimate of the maximal profit:
-    // It's the price delta^2 times the liquidity
+    // It's the price delta times the liquidity
     const sourcePrice = edgeInfo.source.price;
     const targetPrice = edgeInfo.target.price;
     const liquidity = edgeInfo.edge.liquidity;
@@ -236,7 +236,7 @@ class ArbitrageBot {
       return 0n;
     }
     const delta = targetPrice - sourcePrice;
-    return delta <= 0 ? 0n : delta * delta * liquidity;
+    return delta <= 0 ? 0n : delta * liquidity;
   }
 
   private calculateNorm(scores: bigint[]): bigint {
@@ -517,6 +517,11 @@ class ArbitrageBot {
         // Breaking out of the loop since we found working quotes
         break;
       }
+    }
+
+    if(liquidity < currentAmount) {
+      console.log("No liquid path available");
+      return null;
     }
 
     if(!bestTrade!.profit) return null;

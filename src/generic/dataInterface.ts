@@ -459,36 +459,34 @@ export class DataInterface {
   // @todo: We need to add groups to this!
   public async loadNodes(limit?: number): Promise<CirclesNode[]> {
     const nodes: CirclesNode[] = [];
-
-    // we first get individual CRCs that are backers
-    const backerAddresses = await this.getCurrentBackers();
-    for (const backerAddress of backerAddresses) {
-      // const isGroup = await this.checkIsGroup(backerAddress as string);
-      const tokenAddress = await this.getERC20Token(backerAddress);
-      const node: CirclesNode = {
-        avatar: backerAddress as Address,
-        isGroup: false,
-        erc20tokenAddress: tokenAddress! as Address, // we know the tokenAddress must exist, since backing requires wrapping.
-        lastUpdated: Date.now(),
-      };
-      nodes.push(node);
+    if(process.env.ONLY_GROUPS !== "true") {
+      // we first get individual CRCs that are backers
+      const backerAddresses = await this.getCurrentBackers();
+      for (const backerAddress of backerAddresses) {
+        // const isGroup = await this.checkIsGroup(backerAddress as string);
+        const tokenAddress = await this.getERC20Token(backerAddress);
+        const node: CirclesNode = {
+          avatar: backerAddress as Address,
+          isGroup: false,
+          erc20tokenAddress: tokenAddress! as Address, // we know the tokenAddress must exist, since backing requires wrapping.
+          lastUpdated: Date.now(),
+        };
+        nodes.push(node);
+      }
     }
 
     // we then simply load all basegroups with an ERC20 token (as I currently don't have a simple way to tell which ones have liquidity)
     const baseGroups = await this.getBaseGroups();
     for (const group of baseGroups) {
-      // @todo check if there is such token in the balancer vault
-      // const isGroup = await this.checkIsGroup(group as string);
       const tokenAddress = await this.getERC20Token(group.address);
       if (!tokenAddress) continue;
-      // @todo move to const
+      // @todo move Balancer Vault to const
+      // Check if there is a group token in the balancerV2 vault
       const balancerVaultV2Balance = await this.getERC20Balance(tokenAddress as Address, "0xBA12222222228d8Ba445958a75a0704d566BF2C8");
       // @todo extend support for v3 in the future
       if (!balancerVaultV2Balance) {
-        console.log("the group skipped: ", group.address)
         continue;
       } else {
-        console.log("group not skipped: ", group.address)
       }
       const node: CirclesNode = {
         avatar: group.address,
@@ -795,6 +793,7 @@ export class DataInterface {
     direction,
     amount,
     logQuote = this.logActivity,
+    skipSwapCallPreparation = false
   }: FetchBalancerQuoteParams): Promise<Swap | null> {
     let swapKind: SwapKind;
     let swapAmount: TokenAmount;
@@ -822,7 +821,7 @@ export class DataInterface {
         console.error("ERROR: Swap path not found: ");
       });
 
-    // if there is no path, we return null
+      // if there is no path, we return null
     if (!sorPaths || sorPaths.length === 0) {
       if (logQuote) {
         const logValues = [
@@ -855,6 +854,8 @@ export class DataInterface {
       ];
       await this.loggerClient.query(logQuoteInsertQuery, logValues);
     }
+
+    if(skipSwapCallPreparation) return swap;
 
     // @dev We attempt to make this call to validate the swap parameters, ensuring we avoid potential errors such as `BAL#305` or other issues related to swap input parameters.
     const result = await swap
@@ -1060,7 +1061,7 @@ export class DataInterface {
         await this.constructExecutionInput(trade, demurragedAmount);
 
       if (!pathFlowData) {
-        console.log("Path is not found");
+        console.log("Liquid path is not found");
         return false;
       }
       // @todo check if `pathFlowData` is not null
@@ -1208,6 +1209,7 @@ export class DataInterface {
       direction: Direction.SELL,
       amount: BigInt(10 ** this.tradingToken.decimals), // Use 1 full unit of trading token as reference
       logQuote: false, // Don't log these routine price checks
+      skipSwapCallPreparation: true
     });
 
     if (!quote) {
