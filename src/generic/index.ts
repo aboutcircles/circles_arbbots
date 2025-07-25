@@ -14,6 +14,7 @@ import {
 
 // global variables
 const LOG_ACTIVITY = true;
+// @todo make this amount adjustable
 const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
 const EXPLORATION_RATE = 0.1;
 const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
@@ -239,11 +240,11 @@ class ArbitrageBot {
   }
 
   private calculateNorm(scores: bigint[]): bigint {
-    // Add small constant to each score and compute sum of squares
+    // Add small constant to each score and compute sum
     const EPSILON = 1000000n; // Small constant to avoid zero vector
     return scores.reduce((sum, score) => {
       const adjustedScore = score + EPSILON;
-      return sum + adjustedScore * adjustedScore;
+      return sum + adjustedScore;
     }, 0n);
   }
 
@@ -267,12 +268,12 @@ class ArbitrageBot {
       return edges[Math.floor(Math.random() * edges.length)];
     }
 
-    // Calculate probabilities proportional to squared scores
+    // Calculate probabilities proportional to scores
     const EPSILON = 1000000n;
     const probabilities = scores.map((score) => {
       const adjustedScore = score + EPSILON;
       return (
-        Number((adjustedScore * adjustedScore * 1000000n) / norm) / 1000000
+        Number((adjustedScore * 1000000n) / norm) / 1000000
       );
     });
 
@@ -376,10 +377,28 @@ class ArbitrageBot {
       ": ",
       currentTargetPrice,
     );
+
+    this.graph.updateNodeAttributes(edgeInfo.sourceKey, (attr) => {
+      return {
+        ...attr,
+        price: currentSourcePrice,
+        lastUpdated: Date.now(),
+      };
+    });
+
+    this.graph.updateNodeAttributes(edgeInfo.targetKey, (attr) => {
+      return {
+        ...attr,
+        price: currentTargetPrice,
+        lastUpdated: Date.now(),
+      };
+    });
+
     const currentEdgeLiquidity = await this.getCurrentLiquidity(
       edgeInfo.source,
       edgeInfo.target,
     );
+
     console.log(
       "Updated liquidity between:",
       edgeInfo.source.avatar,
@@ -394,22 +413,6 @@ class ArbitrageBot {
       return {
         ...attr,
         liquidity: currentEdgeLiquidity,
-        lastUpdated: Date.now(),
-      };
-    });
-
-    this.graph.updateNodeAttributes(edgeInfo.sourceKey, (attr) => {
-      return {
-        ...attr,
-        price: currentSourcePrice,
-        lastUpdated: Date.now(),
-      };
-    });
-
-    this.graph.updateNodeAttributes(edgeInfo.targetKey, (attr) => {
-      return {
-        ...attr,
-        price: currentTargetPrice,
         lastUpdated: Date.now(),
       };
     });
@@ -452,7 +455,7 @@ class ArbitrageBot {
   private async getCurrentSpotPrice(node: CirclesNode): Promise<bigint | null> {
     const swapData = await this.dataInterface.getSpotPrice(
       node.erc20tokenAddress,
-    );
+    );    
     if (!swapData) {
       return null;
     }
@@ -471,44 +474,61 @@ class ArbitrageBot {
     target: CirclesNode,
     liquidity: bigint,
   ): Promise<Trade | null> {
-    // @todo rework to have buy collateral at slightly lover value
-    let currentAmount = MIN_BUYING_AMOUNT;
-
+    // @todo improve types
+    const referenceAmounts = [MIN_BUYING_AMOUNT, MIN_BUYING_AMOUNT * 10n];
     let collateralBalance = await this.dataInterface.getTradingTokenBalance();
+    let currentAmount = 0n;
+    let bestTrade: Trade;
 
-    // Get initial quotes
-    const initialBuyQuote = await this.dataInterface.getTradingQuote({
-      tokenAddress: source.erc20tokenAddress,
-      direction: Direction.BUY,
-      amount: currentAmount,
-    });
+    // Try different reference amounts until we find one that works
+    for (currentAmount of referenceAmounts) {
+      console.log(`Trying reference amount: ${currentAmount}`);
+      
+      // Get quotes for current amount
+      const initialBuyQuote = await this.dataInterface.getTradingQuote({
+        tokenAddress: source.erc20tokenAddress,
+        direction: Direction.BUY,
+        amount: currentAmount,
+      });
 
-    const initialSellQuote = await this.dataInterface.getTradingQuote({
-      tokenAddress: target.erc20tokenAddress,
-      direction: Direction.SELL,
-      amount: (currentAmount * 999n) / 1000n,
-    });
+      const initialSellQuote = await this.dataInterface.getTradingQuote({
+        tokenAddress: target.erc20tokenAddress,
+        direction: Direction.SELL,
+        amount: (currentAmount * 999n) / 1000n,
+      });
 
-    if (
-      !initialBuyQuote ||
-      !initialSellQuote ||
-      initialBuyQuote.inputAmount.amount > collateralBalance
-    ) {
+      // Check if both quotes are valid and we have enough balance
+      if (
+        initialBuyQuote &&
+        initialSellQuote &&
+        initialBuyQuote.inputAmount.amount <= collateralBalance
+      ) {
+        console.log(`Successfully got quotes with reference amount: ${currentAmount}`);
+
+        bestTrade = {
+          buyQuote: initialBuyQuote,
+          sellQuote: initialSellQuote,
+          buyNode: source,
+          sellNode: target,
+          amount: currentAmount,
+          profit:
+            initialSellQuote.outputAmount.amount -
+            initialBuyQuote.inputAmount.amount,
+        };
+                
+        // Breaking out of the loop since we found working quotes
+        break;
+      }
+    }
+
+    if(liquidity < currentAmount) {
+      console.log("No liquid path available");
       return null;
     }
 
-    let bestTrade: Trade = {
-      buyQuote: initialBuyQuote,
-      sellQuote: initialSellQuote,
-      buyNode: source,
-      sellNode: target,
-      amount: currentAmount,
-      profit:
-        initialSellQuote.outputAmount.amount -
-        initialBuyQuote.inputAmount.amount,
-    };
+    if(!bestTrade!.profit) return null;
 
-    // @todo: This needs to be improved as right now it simply reverts wheneever it doesn't get a good quote (e.g. because of missing liquidity in the pools...)
+    // @todo This needs to be improved as right now it simply reverts whenever it doesn't get a good quote (e.g. because of missing liquidity in the pools...)
     while (currentAmount < liquidity / 2n) {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -528,7 +548,7 @@ class ArbitrageBot {
       });
 
       if (!buyQuote || !sellQuote) {
-        return bestTrade;
+        return bestTrade!;
       }
 
       const currentProfit =
@@ -536,10 +556,10 @@ class ArbitrageBot {
 
       // If profit decreased or the new quote exceeds the bot's balance in collateral, return the previous (best) trade
       if (
-        currentProfit < bestTrade.profit ||
+        currentProfit < bestTrade!.profit ||
         buyQuote.inputAmount.amount > collateralBalance
       ) {
-        return bestTrade;
+        return bestTrade!;
       }
 
       // Update best trade if profit increased
@@ -553,7 +573,7 @@ class ArbitrageBot {
       };
     }
 
-    return bestTrade;
+    return bestTrade!;
   }
 
   async executeTrade(trade: Trade): Promise<boolean> {

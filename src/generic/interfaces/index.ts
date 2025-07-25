@@ -47,6 +47,7 @@ export interface FetchBalancerQuoteParams {
   direction: Direction;
   amount: bigint;
   logQuote?: boolean;
+  skipSwapCallPreparation?: boolean;
 }
 
 export interface BalanceRow {
