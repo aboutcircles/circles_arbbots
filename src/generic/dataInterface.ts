@@ -1,11 +1,27 @@
 import pg from "pg";
 const { Client } = pg;
 import WebSocket from "ws";
-import assert from "assert";
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
 }
+
+// Import ethers v6
+import { ethers, Contract, Wallet } from "ethers";
+
+import {
+  BalancerApi,
+  ChainId,
+  SwapKind,
+  Token,
+  TokenAmount,
+  Swap,
+} from "@balancer/sdk";
+
+import { createFlowMatrix } from '@circles-sdk/pathfinder';
+import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
+import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
+import { CirclesConverter } from "@circles-sdk/utils";
 
 import {
   BalanceRow,
@@ -17,13 +33,8 @@ import {
   TrustRelationRow,
   Address,
   DataInterfaceParams,
-  SwapExecutionOptions,
-  TradeExecutionResult,
   Trade,
 } from "./interfaces/index.js";
-
-// Import ethers v6
-import { ethers, Contract, Wallet } from "ethers";
 
 // ABI
 import {
@@ -35,30 +46,20 @@ import {
 } from "./abi/index.js";
 
 import {
-  BalancerApi,
-  ChainId,
-  Slippage,
-  SwapKind,
-  Token,
-  TokenAmount,
-  Swap,
-} from "@balancer/sdk";
-
-import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
-import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
+  DemurragedVSInflation,
+  erc20LiftAddress,
+  middlewareAddress,
+  BALANCER_VAULT,
+  PROFIT_THRESHOLD,
+  logQuoteInsertQuery,
+  logTradeInsertQuery,
+  logLiquidityEstimateQuery
+} from "./helpers/constants.js";
 
 // Global config
-const rpcUrl = process.env.RPC_URL;
-const DemurragedVSInflation = 1;
+const rpcUrl = process.env.RPC_URL!;
 const chainId = ChainId.GNOSIS_CHAIN;
 const botPrivateKey = process.env.PRIVATE_KEY!;
-// @todo share this among two files
-const PROFIT_THRESHOLD = BigInt(1e12); // profit threshold, should be denominated in the colalteral curreny
-
-
-// Constant addresses
-const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
-const middlewareAddress = "0x36fad3df6d61060f285061f74d26eab2b514addb";
 
 /**
  * @notice Initializes core blockchain objects.
@@ -93,24 +94,6 @@ const hubV2Contract = new Contract(
   wallet,
 );
 
-const logQuoteInsertQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
-
-const logTradeInsertQuery = `INSERT INTO "tradeOpportunties" ("timestamp", "buytoken", "selltoken", "referencetoken", "buyamount", "intermediateamount", "sellamount", "estimatedprofit") VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)`;
-
-const logLiquidityEstimateQuery = `
-  INSERT INTO "liquidity_estimates" (
-    "timestamp",
-    "source_avatar",
-    "target_avatar",
-    "source_token",
-    "target_token",
-    "liquidity",
-    "source_price",
-    "target_price"
-  )
-  VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8)
-`;
-
 const middlewareContract = new Contract(
   middlewareAddress,
   middlewareAbi,
@@ -132,10 +115,10 @@ export class DataInterface {
 
   constructor(params: DataInterfaceParams) {
     this.client = new pg.Client({
-      host: "144.76.163.174",
+      host: "104.199.5.198",
       port: 5432,
-      database: "circles",
-      user: "readonly_user",
+      database: "postgres",
+      user: "circlesarbbotreadonly",
       password: process.env.POSTGRESQL_PW,
     });
 
@@ -332,7 +315,7 @@ export class DataInterface {
 
     // const body = JSON.stringify(findPathPayload);
     // console.log("pathfinder query body: ", body);
-    const response = await fetch("https://rpc.aboutcircles.com/", {
+    const response = await fetch(rpcUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -368,10 +351,7 @@ export class DataInterface {
       });
 
       // Convert demurraged to inflationary
-      const estimatedLiquidity = await this.convertDemurrageToInflationary(
-        target.erc20tokenAddress,
-        maxTransferableAmount,
-      );
+      const estimatedLiquidity = CirclesConverter.attoCirclesToAttoStaticCircles(BigInt(maxTransferableAmount));
 
       if (this.logActivity) {
         await this.logLiquidityEstimate({
@@ -413,7 +393,6 @@ export class DataInterface {
 
       return true;
     } catch (error) {
-      // @todo check `unsupported addressable value` error
       console.error("Error updating middleware trust:", error);
       return false;
     }
@@ -456,7 +435,6 @@ export class DataInterface {
     }
   }
 
-  // @todo: We need to add groups to this!
   public async loadNodes(limit?: number): Promise<CirclesNode[]> {
     const nodes: CirclesNode[] = [];
     if(process.env.ONLY_GROUPS !== "true") {
@@ -480,13 +458,11 @@ export class DataInterface {
     for (const group of baseGroups) {
       const tokenAddress = await this.getERC20Token(group.address);
       if (!tokenAddress) continue;
-      // @todo move Balancer Vault to const
       // Check if there is a group token in the balancerV2 vault
-      const balancerVaultV2Balance = await this.getERC20Balance(tokenAddress as Address, "0xBA12222222228d8Ba445958a75a0704d566BF2C8");
+      const balancerVaultV2Balance = await this.getERC20Balance(tokenAddress as Address, BALANCER_VAULT);
       // @todo extend support for v3 in the future
       if (!balancerVaultV2Balance) {
         continue;
-      } else {
       }
       const node: CirclesNode = {
         avatar: group.address,
@@ -921,9 +897,9 @@ export class DataInterface {
         toTokens,
       );
 
-      const theFlow = this.sdk.v2Pathfinder.createFlowMatrix(
+      const theFlow = createFlowMatrix(
         middlewareAddress,
-        toAddress, // @todo check if this is correct
+        toAddress,
         buildPath.maxFlow,
         buildPath.transfers.map((transfer: any) => {
           return {
@@ -957,7 +933,6 @@ export class DataInterface {
     demurragedAmount: bigint,
   ) {
     // @todo fix type safety
-    // @todo update comments
     // Validate required parameters
     if (!trade || !demurragedAmount) {
       throw new Error("Missing required parameters");
@@ -985,7 +960,6 @@ export class DataInterface {
       },
       // Set appropriate limits based on expected amounts
       limits: buyQuote.swap.assets.map((asset: Address) => {
-        // @todo add profitability to the limit
         if (asset === buyQuote.inputAmount.token.address) {
           return (buyQuote.inputAmount.amount + PROFIT_THRESHOLD).toString();
         }
@@ -1052,10 +1026,7 @@ export class DataInterface {
         wallet,
       );
 
-      const demurragedAmount = await this.convertInflationaryToDemurrage(
-        trade.buyNode.erc20tokenAddress,
-        trade.amount,
-      );
+      const demurragedAmount = CirclesConverter.attoStaticCirclesToAttoCircles(trade.amount);
 
       const [buyAssetIndex, buySwapData, sellSwapData, pathFlowData] =
         await this.constructExecutionInput(trade, demurragedAmount);
@@ -1064,7 +1035,6 @@ export class DataInterface {
         console.log("Liquid path is not found");
         return false;
       }
-      // @todo check if `pathFlowData` is not null
       const currentAllowance = await this.checkAllowance(
         trade.buyQuote.inputAmount.token.address,
         wallet.address,
