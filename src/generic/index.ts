@@ -9,26 +9,22 @@ import {
   Address,
   BalanceRow,
   TrustRelationRow,
-  SwapExecutionOptions,
 } from "./interfaces/index.js";
 
-// global variables
-const LOG_ACTIVITY = true;
-// @todo make this amount adjustable
-const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
-const EXPLORATION_RATE = 0.1;
-const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
-const PROFIT_THRESHOLD = BigInt(1e12); // profit threshold, should be denominated in the colalteral curreny
-const RESYNC_INTERVAL = 1000 * 60 * 60; // Resync every 60 minutes
-const DEFAULT_PRICE_REF_ADDRESS =
-  "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b".toLowerCase() as Address; // METRI TEST SUPERGROUP
-const TRADING_TOKEN =
-  "0x6c76971f98945ae98dd7d4dfca8711ebea946ea6".toLowerCase() as Address; // wstETH
-const TRADING_TOKEN_DECIMALS = 18;
-const QUOTE_TOKEN =
-  "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d".toLowerCase() as Address; // xDAI
-const QUOTE_TOKEN_DEMICALS = 18;
-const NODE_LIMIT = undefined;
+import {
+  DEFAULT_PRICE_REF_ADDRESS,
+  EXPLORATION_RATE,
+  LOG_ACTIVITY,
+  MIN_BUYING_AMOUNT,
+  NODE_LIMIT,
+  PROFIT_THRESHOLD,
+  QUERY_REFERENCE_AMOUNT,
+  QUOTE_TOKEN,
+  QUOTE_TOKEN_DEMICALS,
+  RESYNC_INTERVAL,
+  TRADING_TOKEN,
+  TRADING_TOKEN_DECIMALS,
+} from "./helpers/constants.js";
 
 class ArbitrageBot {
   private graph: DirectedGraph;
@@ -478,7 +474,7 @@ class ArbitrageBot {
     const referenceAmounts = [MIN_BUYING_AMOUNT, MIN_BUYING_AMOUNT * 10n];
     let collateralBalance = await this.dataInterface.getTradingTokenBalance();
     let currentAmount = 0n;
-    let bestTrade: Trade;
+    let bestTrade: Trade | null = null;
 
     // Try different reference amounts until we find one that works
     for (currentAmount of referenceAmounts) {
@@ -526,7 +522,7 @@ class ArbitrageBot {
       return null;
     }
 
-    if(!bestTrade!.profit) return null;
+    if (!bestTrade?.profit) return null;
 
     // @todo This needs to be improved as right now it simply reverts whenever it doesn't get a good quote (e.g. because of missing liquidity in the pools...)
     while (currentAmount < liquidity / 2n) {
