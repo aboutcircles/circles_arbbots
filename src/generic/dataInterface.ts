@@ -21,7 +21,7 @@ import {
 import { createFlowMatrix } from '@circles-sdk/pathfinder';
 import { circlesConfig, Sdk, Avatar } from "@circles-sdk/sdk";
 import { PrivateKeyContractRunner } from "@circles-sdk/adapter-ethers";
-import { CirclesConverter } from "@circles-sdk/utils";
+import { CirclesConverter, cidV0ToUint8Array } from "@circles-sdk/utils";
 
 import {
   BalanceRow,
@@ -38,17 +38,22 @@ import {
 
 // ABI
 import {
+  baseGroupAbi,
   erc20Abi,
   hubV2Abi,
   erc20LiftAbi,
   inflationaryTokenAbi,
   middlewareAbi,
+  arbbotOracleAbi,
+  arbbotV2Abi
 } from "./abi/index.js";
 
 import {
   DemurragedVSInflation,
   erc20LiftAddress,
   middlewareAddress,
+  arbbotOracleAddress,
+  arbbotV2Address,
   BALANCER_VAULT,
   PROFIT_THRESHOLD,
   logQuoteInsertQuery,
@@ -100,6 +105,16 @@ const middlewareContract = new Contract(
   wallet,
 );
 
+const arbbotOracle = new Contract(
+  arbbotOracleAddress,
+  arbbotOracleAbi,
+  wallet
+);
+const arbbotV2 = new Contract(
+  arbbotV2Address,
+  arbbotV2Abi,
+  wallet
+);
 export class DataInterface {
   private client: pg.Client;
   private loggerClient: pg.Client;
@@ -381,12 +396,12 @@ export class DataInterface {
     try {
       // Check if trust already exists
       const isTrusted = await hubV2Contract.isTrusted(
-        middlewareAddress,
+        arbbotV2Address,
         tokenAvatar,
       );
 
       if (!isTrusted) {
-        const tx = await middlewareContract.forceTrust(tokenAvatar);
+        const tx = await arbbotV2.forceTrust(tokenAvatar);
         await tx.wait();
         console.log(`Middleware forceTrusted: ${tokenAvatar}`);
       }
@@ -418,16 +433,20 @@ export class DataInterface {
   private async getBaseGroups(): Promise<BaseGroupRow[]> {
     try {
       const query = `
-          SELECT
-            "group",
-            "mintHandler"
-          FROM "CrcV2_BaseGroupCreated"
-        `;
+        SELECT 
+          "group",
+          "mintHandler",
+          "erc20WrapperStatic"
+        FROM "V_CrcV2_Groups" where "erc20WrapperStatic" is not null and
+          "V_CrcV2_Groups"."mintPolicy"='0xcdfc5135aec0afbf102c108e7f5c8a88c6112842' and
+          "V_CrcV2_Groups"."memberCount" > 0
+        `;// @todo move mintPolicy to const
 
       const result = await this.client.query(query);
       return result.rows.map((row) => ({
         address: row.group,
         mintHandler: row.mintHandler,
+        erc20tokenAddress: row.erc20WrapperStatic
       }));
     } catch (error) {
       console.error("Error fetching base groups:", error);
@@ -438,40 +457,66 @@ export class DataInterface {
   public async loadNodes(limit?: number): Promise<CirclesNode[]> {
     const nodes: CirclesNode[] = [];
     if(process.env.ONLY_GROUPS !== "true") {
+      console.log(process.env.ONLY_GROUPS)
       // we first get individual CRCs that are backers
       const backerAddresses = await this.getCurrentBackers();
       for (const backerAddress of backerAddresses) {
         // const isGroup = await this.checkIsGroup(backerAddress as string);
         const tokenAddress = await this.getERC20Token(backerAddress);
+        // TESTING space
+        let poolid = "";
+
+        if("0xAE85EC45034BD0A6e154c51BEDebEf6c07D45131".toLowerCase() == tokenAddress) {
+          poolid = "0x55ac2dfed28c703ae21f663edbb24b692095518b00020000000000000000013d";
+        }
+
         const node: CirclesNode = {
           avatar: backerAddress as Address,
           isGroup: false,
+          pools: [poolid],
           erc20tokenAddress: tokenAddress! as Address, // we know the tokenAddress must exist, since backing requires wrapping.
           lastUpdated: Date.now(),
         };
-        nodes.push(node);
+        if("0xAE85EC45034BD0A6e154c51BEDebEf6c07D45131".toLowerCase() == tokenAddress?.toLowerCase()) {
+          nodes.push(node);
+
+          console.log("match found", node)
+        }
       }
     }
-
+    // @todo understand why groups are not executed
     // we then simply load all basegroups with an ERC20 token (as I currently don't have a simple way to tell which ones have liquidity)
     const baseGroups = await this.getBaseGroups();
     for (const group of baseGroups) {
-      const tokenAddress = await this.getERC20Token(group.address);
-      if (!tokenAddress) continue;
+      if (!group.mintHandler) {
+        const mintHandler = await this.getMintHandler(group.address);
+        if(!mintHandler) continue;
+        group.mintHandler = mintHandler;
+      };
+      
       // Check if there is a group token in the balancerV2 vault
-      const balancerVaultV2Balance = await this.getERC20Balance(tokenAddress as Address, BALANCER_VAULT);
+      const balancerVaultV2Balance = await this.getERC20Balance(group.erc20tokenAddress as Address, BALANCER_VAULT);
       // @todo extend support for v3 in the future
       if (!balancerVaultV2Balance) {
         continue;
       }
+
+      let poolid = "";
+      if("0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a".toLowerCase() == group.erc20tokenAddress.toLowerCase()) {
+        poolid = "0x5e08b6fe16f450668f38efa5493800dea392df8c000200000000000000000148";
+      }
+
       const node: CirclesNode = {
         avatar: group.address,
         isGroup: true,
-        erc20tokenAddress: tokenAddress as Address,
+        pools: [poolid],
+        erc20tokenAddress: group.erc20tokenAddress as Address,
         mintHandler: group.mintHandler,
         lastUpdated: Date.now(),
       };
-      nodes.push(node);
+      if("0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a".toLowerCase() == group.erc20tokenAddress.toLowerCase()) {
+        nodes.push(node);
+      }
     }
     if (limit) return nodes.slice(0, limit);
     return nodes;
@@ -604,6 +649,26 @@ export class DataInterface {
     return tokenAddress.toLowerCase();
   }
 
+  public async getMintHandler(group: Address): Promise<Address | null> {
+    console.log("input group", group);
+    const groupContract = new Contract(
+      group,
+      baseGroupAbi,
+      provider,
+    );
+    try {
+      const mintHandler = await groupContract.BASE_MINT_HANDLER.staticCall();
+      console.log("result", mintHandler);
+      if (mintHandler === ethers.ZeroAddress) {
+        return null;
+      }
+      return mintHandler.toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+
+
   /**
    * @notice Retrieves the bot's ERC20 token balance.
    * @param tokenAddress The address of the ERC20 token.
@@ -620,6 +685,30 @@ export class DataInterface {
     // Fetch the balance
     let balance = await tokenContract.balanceOf(holder);
     return balance;
+  }
+  public async getTradeCalculation(
+    token1: Address,
+    pool1: string,
+    token2: Address,
+    pool2: string,
+    amount: bigint
+  ) { // @todo add typescript support
+
+    const executionData = await arbbotOracle.checkCRCArbitrage.staticCall(
+      token1,
+      pool1,
+      token2,
+      pool2,
+      amount
+    );
+    
+    return executionData;
+  }
+
+  public async getOracleSpotPrice(tokenAddress: Address, poolId: string): Promise<bigint> {
+    const amount = await arbbotOracle.getSwapQuoteToDAI.staticCall(tokenAddress, poolId, BigInt(1e18));
+    console.log("extracted price", amount);
+    return amount;
   }
 
   public async getSpotPrice(tokenAddress: Address): Promise<Swap | null> {
@@ -873,7 +962,7 @@ export class DataInterface {
       // so we don't actually update this here.
       const toAddress = params.to.isGroup
         ? params.to.mintHandler!
-        : middlewareAddress;
+        : arbbotV2Address;
       const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
 
       if (!params.to.isGroup) {
@@ -887,7 +976,15 @@ export class DataInterface {
       }
 
       const maxHolder = await this.getMaxHolder(params.from.avatar);
-
+      console.log(
+        "pathfinder args",
+        maxHolder,
+        toAddress,
+        params.requestedAmount.toString(),
+        false,
+        [params.from.avatar],
+        toTokens
+      )
       const buildPath = await this.sdk.v2Pathfinder.getPath(
         maxHolder,
         toAddress,
@@ -897,14 +994,16 @@ export class DataInterface {
         toTokens,
       );
 
+      console.log(buildPath);
+
       const theFlow = createFlowMatrix(
-        middlewareAddress,
+        arbbotV2Address,
         toAddress,
         buildPath.maxFlow,
         buildPath.transfers.map((transfer: any) => {
           return {
             from:
-              transfer.from == maxHolder ? middlewareAddress : transfer.from,
+              transfer.from == maxHolder ? arbbotV2Address : transfer.from,
             to: transfer.to,
             tokenOwner: transfer.tokenOwner,
             value: transfer.value,
@@ -1017,7 +1116,43 @@ export class DataInterface {
         : null,
     ];
   }
+  async executeWithV2(
+    buyNode: CirclesNode,
+    sellNode: CirclesNode,
+    requiredEth: bigint
+  ) {
+    // @todo add slight delta
+    const AMOUNT_TO_BUY = BigInt(1e18);
+    const demurragedAmount = CirclesConverter.attoStaticCirclesToAttoCircles(AMOUNT_TO_BUY);
+    const pathFlow = await this.getPathfinderTransferData({
+      from: buyNode,
+      to: sellNode,
+      requestedAmount: demurragedAmount,
+    });
+    console.log("execution data");
+    console.log(requiredEth, demurragedAmount);
+    console.dir(pathFlow, {depth: null});
 
+    
+
+    const arbTx = await arbbotV2.executeArbitrageWithFlashLoan(
+      buyNode.erc20tokenAddress,
+      buyNode.pools?.[0],
+      sellNode.erc20tokenAddress,
+      sellNode.pools?.[0],
+      AMOUNT_TO_BUY,
+      requiredEth,
+      {
+        flowVertices: pathFlow.flowVertices,
+        flow: pathFlow.flowEdges,
+        streams: pathFlow.streams,
+        packedCoordinates: pathFlow.packedCoordinates,
+      },
+      "0x40C8e83414dCa470B8BAD8a46C91837B80f960A4"
+    );
+    const recipt = await arbTx.wait();
+    console.log(recipt);
+  }
   async executeWithMiddleware(trade: Trade): Promise<boolean> {
     try {
       const middlewareContract = new Contract(
