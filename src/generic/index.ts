@@ -30,6 +30,12 @@ class ArbitrageBot {
   private graph: DirectedGraph;
   private explorationRate: number;
   private dataInterface: DataInterface;
+  // Failed edge props
+  private failedEdges: Map<string, number> = new Map(); // edgeKey -> timestamp when it failed
+  private readonly COOLDOWN_PERIOD = 5 * 60 * 1000; // 5 minutes in milliseconds
+  private readonly MAX_CONSECUTIVE_FAILURES = 3; // Max failures before longer cooldown
+  private edgeFailureCount: Map<string, number> = new Map(); // Track consecutive failures
+
 
   constructor(explorationRate: number = EXPLORATION_RATE) {
     this.graph = new DirectedGraph();
@@ -255,13 +261,33 @@ class ArbitrageBot {
   }
 
   private selectNextEdge(): string {
+    const currentTime = Date.now();
     const edges = this.graph.edges();
-    const scores = edges.map((edge) => this.scoreEdge(edge));
+    
+    // Filter out edges that are in cooldown period
+    const availableEdges = edges.filter(edge => {
+      const failureTime = this.failedEdges.get(edge);
+      if (!failureTime) return true; // Never failed, available
+      
+      const failureCount = this.edgeFailureCount.get(edge) || 0;
+      const cooldownMultiplier = Math.min(failureCount, 5); // Cap at 5x cooldown
+      const effectiveCooldown = this.COOLDOWN_PERIOD * cooldownMultiplier;
+      
+      return (currentTime - failureTime) > effectiveCooldown;
+    });
+
+    // If no edges are available (all in cooldown), use all edges as fallback
+    const edgesToConsider = availableEdges.length > 0 ? availableEdges : edges;
+    
+    console.log(`Available edges: ${availableEdges.length}/${edges.length}`);
+    
+    // Calculate scores only for available edges
+    const scores = edgesToConsider.map((edge) => this.scoreEdge(edge));
 
     const norm = this.calculateNorm(scores);
     if (norm === 0n) {
       // Fallback to uniform sampling if all scores are 0
-      return edges[Math.floor(Math.random() * edges.length)];
+      return edgesToConsider[Math.floor(Math.random() * edgesToConsider.length)];
     }
 
     // Calculate probabilities proportional to scores
@@ -274,25 +300,63 @@ class ArbitrageBot {
     });
 
     const selectedIndex = this.sampleFromDistribution(probabilities);
-    return edges[selectedIndex];
+    return edgesToConsider[selectedIndex];
   }
 
-  // private selectNextEdge(): string {
-  //   if (Math.random() < this.explorationRate) {
-  //     // @todo: improve this
-  //     // randomly select an edge uniformly
-  //     const edges = this.graph.edges();
-  //     const randomIndex = Math.floor(Math.random() * edges.length);
-  //     return edges[randomIndex];
-  //   } else {
-  //     // Select highest scoring edge
-  //     return this.graph.reduceEdges(
-  //       (best, current) =>
-  //         this.scoreEdge(current) >= this.scoreEdge(best) ? current : best,
-  //       "",
-  //     );
-  //   }
-  // }
+
+  // Method to mark an edge as failed
+  private markEdgeAsFailed(edgeKey: string): void {
+    const currentTime = Date.now();
+    this.failedEdges.set(edgeKey, currentTime);
+    
+    // Increment failure count
+    const currentFailures = this.edgeFailureCount.get(edgeKey) || 0;
+    this.edgeFailureCount.set(edgeKey, currentFailures + 1);
+    
+    const cooldownMinutes = Math.min(currentFailures + 1, 5) * 5; // 5, 10, 15, 20, 25 minutes max
+    console.log(`Edge ${edgeKey} marked as failed. Cooldown: ${cooldownMinutes} minutes`);
+  }
+
+  // Method to mark an edge as successful (reset failure count)
+  private markEdgeAsSuccessful(edgeKey: string): void {
+    this.failedEdges.delete(edgeKey);
+    this.edgeFailureCount.delete(edgeKey);
+    console.log(`Edge ${edgeKey} marked as successful`);
+  }
+
+  // Method to clean up old failures (call periodically)
+  private cleanupOldFailures(): void {
+    const currentTime = Date.now();
+    const maxCooldown = this.COOLDOWN_PERIOD * 5; // Maximum possible cooldown
+    
+    for (const [edgeKey, failureTime] of this.failedEdges.entries()) {
+      if (currentTime - failureTime > maxCooldown) {
+        this.failedEdges.delete(edgeKey);
+        this.edgeFailureCount.delete(edgeKey);
+      }
+    }
+  }
+
+  // Add a method to get cooldown statistics (useful for monitoring)
+  public getCooldownStats(): { totalFailed: number, currentlyCooling: number } {
+    const currentTime = Date.now();
+    let currentlyCooling = 0;
+    
+    for (const [edgeKey, failureTime] of this.failedEdges.entries()) {
+      const failureCount = this.edgeFailureCount.get(edgeKey) || 0;
+      const cooldownMultiplier = Math.min(failureCount, 5);
+      const effectiveCooldown = this.COOLDOWN_PERIOD * cooldownMultiplier;
+      
+      if ((currentTime - failureTime) <= effectiveCooldown) {
+        currentlyCooling++;
+      }
+    }
+    
+    return {
+      totalFailed: this.failedEdges.size,
+      currentlyCooling: currentlyCooling
+    };
+  }
 
   // Helper method for destructuring edge information since TypeScript
   // doesn't easily infer types from array destructuring
@@ -312,53 +376,70 @@ class ArbitrageBot {
     };
   }
 
+  // Modified executeArbitrageRound method
   private async executeArbitrageRound(): Promise<void> {
     console.log("\nStarting new arbitrage round...");
+    
+    // Clean up old failures periodically
+    if (Math.random() < 0.1) { // 10% chance each round
+      //this.cleanupOldFailures();
+    }
+    
     const edgeKey = this.selectNextEdge();
 
-    console.log("Winnign edge score:", this.scoreEdge(edgeKey));
-
+    console.log("Winning edge score:", this.scoreEdge(edgeKey));
     console.log("Updating values for selected edge: ", edgeKey);
-    const updatedEdgeInfo = await this.updateValues(edgeKey);
+    
+    try {
+      const updatedEdgeInfo = await this.updateValues(edgeKey);
 
-    console.log("Calculating optimal trade...");
-    // @todo The contract function "queryBatchSwap" reverted with the following reason:
-    // @todo BAL#305
-    const optimalTrade = await this.calculateOptimalTrade(
-      updatedEdgeInfo.source,
-      updatedEdgeInfo.target,
-      updatedEdgeInfo.edge.liquidity,
-    );
+      console.log("Calculating optimal trade...");
+      const optimalTrade = await this.oracleCalculateOptimalTrade(
+        updatedEdgeInfo.source,
+        updatedEdgeInfo.target,
+        updatedEdgeInfo.edge.liquidity,
+      );
 
-    if (optimalTrade) {
-      console.log(`Found trade with profit: ${optimalTrade.profit.toString()}`);
+      console.log("liquidity info and optimal trade: ", updatedEdgeInfo.edge.liquidity, optimalTrade);
 
-      if (LOG_ACTIVITY) {
-        await this.dataInterface.logTradeOpportunity({
-          buyToken: optimalTrade.buyNode.erc20tokenAddress,
-          sellToken: optimalTrade.sellNode.erc20tokenAddress,
-          referenceToken: this.dataInterface.tradingToken.address,
-          buyAmount: optimalTrade.buyQuote.inputAmount.amount,
-          intermediateAmount: optimalTrade.amount,
-          sellAmount: optimalTrade.sellQuote.outputAmount.amount,
-          estimatedProfit: optimalTrade.profit,
-        });
-      }
+      const profit = BigInt(optimalTrade[2]);
+      if (optimalTrade[1]) {
+        console.log(`Found trade with profit: ${profit.toString()}`);
 
-      if (optimalTrade.profit > PROFIT_THRESHOLD) {
-        console.log("Trade exceeds profit threshold, executing...");
-        await this.executeTrade(optimalTrade);
+        if (profit > BigInt(1e14)) {
+          console.log("Trade exceeds profit threshold, executing...");
+          
+          // Try to execute the trade
+          const executionSuccess = await this.executeArbitrage(
+            updatedEdgeInfo.source, 
+            updatedEdgeInfo.target, 
+            optimalTrade[3],
+            optimalTrade[0]
+          );
+          
+          if (executionSuccess) {
+            console.log("Trade executed successfully");
+            this.markEdgeAsSuccessful(edgeKey);
+          } else {
+            console.log("Trade execution failed");
+            this.markEdgeAsFailed(edgeKey);
+          }
+        } else {
+          console.log("Trade below profit threshold, skipping execution");
+          // Don't mark as failed if it's just unprofitable
+        }
       } else {
-        console.log("Trade below profit threshold, skipping execution");
+        console.log("No viable trade found");
+        this.markEdgeAsFailed(edgeKey);
       }
-    } else {
-      console.log("No viable trade found");
+    } catch (error) {
+      console.error("Error in arbitrage round:", error);
+      this.markEdgeAsFailed(edgeKey);
     }
   }
 
   private async updateValues(edgeKey: string): Promise<EdgeInfo> {
     const edgeInfo = this.getEdgeInfo(edgeKey);
-
     const currentSourcePrice = await this.getCurrentSpotPrice(edgeInfo.source);
     console.log(
       "Updated price for ",
@@ -424,7 +505,7 @@ class ArbitrageBot {
     const referencePrice = (await this.dataInterface.getSpotPrice(
       referenceToken! as Address,
     ))!.inputAmount.amount;
-
+    // @todo possibly it makes more sense just to check the price onchain
     const latestPrices = await this.dataInterface.fetchLatestPrices(
       nodes.map((node) => node.erc20tokenAddress),
     );
@@ -449,6 +530,13 @@ class ArbitrageBot {
   }
 
   private async getCurrentSpotPrice(node: CirclesNode): Promise<bigint | null> {
+    const spotPrice = await this.dataInterface.getOracleSpotPrice(
+      node.erc20tokenAddress,
+      node.pools?.[0] || ""
+    )
+
+    return BigInt(spotPrice);
+    /*
     const swapData = await this.dataInterface.getSpotPrice(
       node.erc20tokenAddress,
     );    
@@ -456,6 +544,7 @@ class ArbitrageBot {
       return null;
     }
     return swapData.inputAmount.amount;
+    */
   }
 
   private async getCurrentLiquidity(
@@ -465,123 +554,93 @@ class ArbitrageBot {
     return this.dataInterface.getSimulatedLiquidity(source, target);
   }
 
-  private async calculateOptimalTrade(
+  private async oracleCalculateOptimalTrade(
     source: CirclesNode,
     target: CirclesNode,
-    liquidity: bigint,
-  ): Promise<Trade | null> {
-    // @todo improve types
-    const referenceAmounts = [MIN_BUYING_AMOUNT, MIN_BUYING_AMOUNT * 10n];
-    let collateralBalance = await this.dataInterface.getTradingTokenBalance();
-    let currentAmount = 0n;
-    let bestTrade: Trade | null = null;
+    liquidity: bigint
+  ): Promise<[bigint, boolean, bigint, bigint]> { // Returns [requiredCRCAmount, isProfitable, profitInWstETH, wstETHNeeded]
+    console.log("liquidity: ", liquidity);
+    console.log("source and target initial price: ", source?.price, target?.price);
+    if (
+      liquidity < BigInt(1e18) || !source.pools?.[0] || !target.pools?.[0] ||
+      (source?.price > target?.price)
+    ) {
+      return [BigInt(0), false, BigInt(0), BigInt(0)];
+    }
 
-    // Try different reference amounts until we find one that works
-    for (currentAmount of referenceAmounts) {
-      console.log(`Trying reference amount: ${currentAmount}`);
+    let currentAmount = BigInt(1e18); // Start with 1 CRC (1e18 wei)
+    let lastProfitableAmount = BigInt(0);
+    let lastProfitableResult: [boolean, bigint, bigint] = [false, BigInt(0), BigInt(0)];
+
+    // Keep doubling until we exceed liquidity or find unprofitable trade
+    // @todo limit extra huge transfers `currentAmount < BigInt(1e20)`
+    while (currentAmount <= liquidity && currentAmount < BigInt(1e20)) {
+      console.log(`Testing amount: ${currentAmount.toString()}`);
       
-      // Get quotes for current amount
-      const initialBuyQuote = await this.dataInterface.getTradingQuote({
-        tokenAddress: source.erc20tokenAddress,
-        direction: Direction.BUY,
-        amount: currentAmount,
-      });
+      try {
+        const executionData = await this.dataInterface.getTradeCalculation(
+          source.erc20tokenAddress,
+          source.pools[0],
+          target.erc20tokenAddress,
+          target.pools[0],
+          currentAmount
+        );
 
-      const initialSellQuote = await this.dataInterface.getTradingQuote({
-        tokenAddress: target.erc20tokenAddress,
-        direction: Direction.SELL,
-        amount: (currentAmount * 999n) / 1000n,
-      });
-
-      // Check if both quotes are valid and we have enough balance
-      if (
-        initialBuyQuote &&
-        initialSellQuote &&
-        initialBuyQuote.inputAmount.amount <= collateralBalance
-      ) {
-        console.log(`Successfully got quotes with reference amount: ${currentAmount}`);
-
-        bestTrade = {
-          buyQuote: initialBuyQuote,
-          sellQuote: initialSellQuote,
-          buyNode: source,
-          sellNode: target,
-          amount: currentAmount,
-          profit:
-            initialSellQuote.outputAmount.amount -
-            initialBuyQuote.inputAmount.amount,
-        };
-                
-        // Breaking out of the loop since we found working quotes
+        const [isProfitable, profitInWstETH, wstETHNeeded] = executionData;
+        
+        if (isProfitable) {
+          // Store the last profitable result
+          lastProfitableAmount = currentAmount;
+          lastProfitableResult = [isProfitable, profitInWstETH, wstETHNeeded];
+          
+          // Double the amount for next iteration
+          currentAmount = currentAmount * BigInt(2);
+        } else {
+          // Trade became unprofitable, break the loop
+          console.log(`Trade became unprofitable at amount: ${currentAmount.toString()}`);
+          break;
+        }
+      } catch (error) {
+        // @dev its part of regular flow
+        console.log(`Error calculating trade for amount ${currentAmount.toString()}`);
         break;
       }
     }
-
-    if(liquidity < currentAmount) {
-      console.log("No liquid path available");
-      return null;
+    
+    if (currentAmount > liquidity && lastProfitableAmount > BigInt(0)) {
+      console.log(`Exceeded liquidity. Last profitable amount: ${lastProfitableAmount.toString()}`);
     }
-
-    if (!bestTrade?.profit) return null;
-
-    // @todo This needs to be improved as right now it simply reverts whenever it doesn't get a good quote (e.g. because of missing liquidity in the pools...)
-    while (currentAmount < liquidity / 2n) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      currentAmount *= 2n;
-
-      // Get quotes for reduced amount
-      const buyQuote = await this.dataInterface.getTradingQuote({
-        tokenAddress: source.erc20tokenAddress,
-        direction: Direction.BUY,
-        amount: currentAmount,
-      });
-
-      const sellQuote = await this.dataInterface.getTradingQuote({
-        tokenAddress: target.erc20tokenAddress,
-        direction: Direction.SELL,
-        amount: (currentAmount * 999n) / 1000n,
-      });
-
-      if (!buyQuote || !sellQuote) {
-        return bestTrade!;
-      }
-
-      const currentProfit =
-        sellQuote.outputAmount.amount - buyQuote.inputAmount.amount;
-
-      // If profit decreased or the new quote exceeds the bot's balance in collateral, return the previous (best) trade
-      if (
-        currentProfit < bestTrade!.profit ||
-        buyQuote.inputAmount.amount > collateralBalance
-      ) {
-        return bestTrade!;
-      }
-
-      // Update best trade if profit increased
-      bestTrade = {
-        buyQuote,
-        sellQuote,
-        buyNode: source,
-        sellNode: target,
-        amount: currentAmount,
-        profit: currentProfit,
-      };
-    }
-
-    return bestTrade!;
+    
+    // Return the optimal (last profitable) result
+    return [
+      lastProfitableAmount,
+      lastProfitableResult[0],
+      lastProfitableResult[1],
+      lastProfitableResult[2]
+    ];
   }
 
-  async executeTrade(trade: Trade): Promise<boolean> {
+  async executeArbitrage(
+    source: CirclesNode,
+    target: CirclesNode,
+    wstToSpend: bigint,
+    crcAmount: bigint = BigInt(1e18)
+  ) {
     try {
-      const result = await this.dataInterface.executeWithMiddleware(trade);
+      const result = await this.dataInterface.executeWithV2(
+        source,
+        target,
+        wstToSpend,
+        crcAmount
+      );
 
-      return result;
+      return result !== undefined && result !== null;
     } catch (error) {
       console.error("Trade execution failed:", error);
       return false;
     }
   }
+
 
   // this is inefficient in the sense that it throws away the whole learned graph and then just reloads
   // the majority of it from the db, however it's a simple way to include new backers and new groups.

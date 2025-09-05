@@ -3,13 +3,14 @@ import { Address } from "../interfaces/index.js";
 // Constant addresses
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
 const middlewareAddress = "0x36fad3df6d61060f285061f74d26eab2b514addb";
-
+const arbbotOracleAddress = "0xd16Fd7cAfB58EFd5df2a34d6BD96B0e9703efF49";
+const arbbotV2Address = "0x767eB36A98a89EB7DE6AD4d0A1049584cB54885e";
 const PROFIT_THRESHOLD = BigInt(1e12); // profit threshold, should be denominated in the colalteral curreny
 
 const DemurragedVSInflation = 1;
 
 // global variables
-const LOG_ACTIVITY = true;
+const LOG_ACTIVITY = false;
 // @todo make this amount adjustable
 const QUERY_REFERENCE_AMOUNT = BigInt(1e17);
 const EXPLORATION_RATE = 0.1;
@@ -25,8 +26,8 @@ const BALANCER_VAULT =
   "0xBA12222222228d8Ba445958a75a0704d566BF2C8".toLowerCase() as Address; // Balancer Vault V2
 const QUOTE_TOKEN_DEMICALS = 18;
 const TRADING_TOKEN_DECIMALS = 18;
-const NODE_LIMIT = undefined;
-
+const NODE_LIMIT = 15;
+const BALANCER_API_URL = "https://api-v3.balancer.fi/";
 
 const logQuoteInsertQuery = `INSERT INTO "quotes" ("timestamp", "inputtoken", "outputtoken", "inputamountraw", "outputamountraw") VALUES (to_timestamp($1), $2, $3, $4, $5)`;
 
@@ -50,6 +51,8 @@ export {
     DemurragedVSInflation,
     erc20LiftAddress,
     middlewareAddress,
+    arbbotOracleAddress,
+    arbbotV2Address,
     BALANCER_VAULT,
     DEFAULT_PRICE_REF_ADDRESS,
     EXPLORATION_RATE,
@@ -65,5 +68,6 @@ export {
     TRADING_TOKEN_DECIMALS,
     logQuoteInsertQuery,
     logTradeInsertQuery,
-    logLiquidityEstimateQuery
+    logLiquidityEstimateQuery,
+    BALANCER_API_URL
 }

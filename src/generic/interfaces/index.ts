@@ -10,6 +10,7 @@ export interface CirclesNode {
   lastUpdated: number;
   isGroup: boolean;
   mintHandler?: Address;
+  pools?: string[]; // BalancerV2 pools
   price?: bigint;
 }
 
@@ -64,6 +65,7 @@ export interface TrustRelationRow {
 export interface BaseGroupRow {
   address: Address;
   mintHandler: Address;
+  erc20tokenAddress: Address;
 }
 
 export interface LatestPriceRow {

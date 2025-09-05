@@ -1,6 +1,8 @@
 import pg from "pg";
 const { Client } = pg;
 import WebSocket from "ws";
+import { writeFileSync } from 'fs';
+
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
@@ -58,7 +60,8 @@ import {
   PROFIT_THRESHOLD,
   logQuoteInsertQuery,
   logTradeInsertQuery,
-  logLiquidityEstimateQuery
+  logLiquidityEstimateQuery,
+  BALANCER_API_URL
 } from "./helpers/constants.js";
 
 // Global config
@@ -74,11 +77,12 @@ const botPrivateKey = process.env.PRIVATE_KEY!;
 const provider = new ethers.JsonRpcProvider(rpcUrl);
 const wallet = new Wallet(botPrivateKey, provider);
 
+
 /**
  * @notice Balancer API instance used to fetch swap paths and quotes.
  */
 const balancerApi = new BalancerApi(
-  "https://api-v3.balancer.fi/",
+  BALANCER_API_URL,
   chainId,
   {
     clientName: process.env.BALANCER_SDK_CLIENT_NAME,
@@ -306,6 +310,7 @@ export class DataInterface {
     }
   }
 
+  // @todo improve the function to get real result
   public async getMaxTransferableAmount(params: {
     from: Address;
     to: Address;
@@ -322,7 +327,7 @@ export class DataInterface {
           Sink: params.to,
           FromTokens: params.fromTokens,
           ToTokens: params.toTokens,
-          WithWrap: true,
+          WithWrap: false,
           TargetFlow: "99999999999999999999999999999999999",
         },
       ],
@@ -432,6 +437,7 @@ export class DataInterface {
 
   private async getBaseGroups(): Promise<BaseGroupRow[]> {
     try {
+      // @todo move mintPolicy to const
       const query = `
         SELECT 
           "group",
@@ -440,7 +446,7 @@ export class DataInterface {
         FROM "V_CrcV2_Groups" where "erc20WrapperStatic" is not null and
           "V_CrcV2_Groups"."mintPolicy"='0xcdfc5135aec0afbf102c108e7f5c8a88c6112842' and
           "V_CrcV2_Groups"."memberCount" > 0
-        `;// @todo move mintPolicy to const
+        `;
 
       const result = await this.client.query(query);
       return result.rows.map((row) => ({
@@ -454,7 +460,105 @@ export class DataInterface {
     }
   }
 
-  public async loadNodes(limit?: number): Promise<CirclesNode[]> {
+  /**
+   * Alternative version that only stores pool IDs instead of full pool objects (for memory efficiency)
+   * @param {Object[]} nodes - Array of node objects with erc20tokenAddress  
+   * @param {Object[]} pools - Array of pool objects from Balancer
+   * @returns {Object[]} Updated nodes array with pool IDs populated
+   */
+  private updateNodesWithPoolIds(nodes: any, pools: any) {
+    if (!nodes || !Array.isArray(nodes)) {
+      console.warn('Invalid nodes array provided');
+      return [];
+    }
+    
+    if (!pools || !Array.isArray(pools)) {
+      console.warn('Invalid pools array provided');
+      return nodes;
+    }
+
+    console.log(`Updating ${nodes.length} nodes with pool IDs from ${pools.length} available pools`);
+    // @todo move to const
+    const supportedTokens: Address[] = [
+      "0xaf204776c7245bF4147c2612BF6e5972Ee483701", // sDAI
+      "0x6A023CCd1ff6F2045C3309768eAd9E68F978f6e1", // WETH
+      "0x6C76971f98945AE98dD7d4DFcA8711ebea946eA6", // wstETH
+      "0x8e5bBbb09Ed1ebdE8674Cda39A0c169401db4252", // WBTC
+      "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb" // GNO
+    ];
+    // Convert supportedTokens to lowercase for case-insensitive comparison
+    const supportedTokensLower = supportedTokens.map(token => token.toLowerCase());
+
+    // Create a map for faster lookup: tokenAddress -> pool IDs containing that token
+    const tokenToPoolIdsMap = new Map();
+    
+    // Build the map by iterating through all pools
+    pools.forEach(pool => {
+      if (pool.poolTokens && Array.isArray(pool.poolTokens)) {
+        // Skip pools with more than 2 tokens
+        if (pool.poolTokens.length > 2) {
+          return;
+        }
+
+        // Check if at least one of the tokens is in the supported tokens list
+        const hasSupprotedToken = pool.poolTokens.some((token: any) => 
+          supportedTokensLower.includes(token.address.toLowerCase())
+        );
+
+        if (!hasSupprotedToken) {
+          return; // Skip this pool if none of the tokens are supported
+        }
+
+        // Process the pool tokens
+        pool.poolTokens.forEach((token: any) => {
+          const tokenAddress = token.address.toLowerCase();
+          
+          if (!tokenToPoolIdsMap.has(tokenAddress)) {
+            tokenToPoolIdsMap.set(tokenAddress, []);
+          }
+          
+          // Add only the pool ID to save memory
+          tokenToPoolIdsMap.get(tokenAddress).push(pool.id);
+        });
+      }
+    });
+
+    console.log(`Created token-to-pool-IDs mapping for ${tokenToPoolIdsMap.size} unique tokens`);
+
+    // Update each node with matching pool IDs
+    const updatedNodes = nodes.map(node => {
+      if (!node.erc20tokenAddress) {
+        console.warn('Node missing erc20tokenAddress:', node);
+        return {
+          ...node,
+          pools: [],
+          lastUpdated: Date.now()
+        };
+      }
+
+      const tokenAddress = node.erc20tokenAddress.toLowerCase();
+      const matchingPoolIds = tokenToPoolIdsMap.get(tokenAddress) || [];
+      
+      console.log(`Token ${node.erc20tokenAddress} found in ${matchingPoolIds.length} pools`);
+      
+      return {
+        ...node,
+        pools: matchingPoolIds
+      };
+    });
+
+    // Log summary
+    const totalPoolsAssigned = updatedNodes.reduce((sum, node) => sum + node.pools.length, 0);
+    const nodesWithPools = updatedNodes.filter(node => node.pools.length > 0).length;
+    
+    console.log(`Summary: ${nodesWithPools}/${updatedNodes.length} nodes have pools assigned`);
+    console.log(`Total pool assignments: ${totalPoolsAssigned}`);
+
+    return updatedNodes;
+  }
+
+  //@todo fix types
+  public async loadNodes(limit?: number): Promise<any[]> {
     const nodes: CirclesNode[] = [];
     if(process.env.ONLY_GROUPS !== "true") {
       console.log(process.env.ONLY_GROUPS)
@@ -463,29 +567,18 @@ export class DataInterface {
       for (const backerAddress of backerAddresses) {
         // const isGroup = await this.checkIsGroup(backerAddress as string);
         const tokenAddress = await this.getERC20Token(backerAddress);
-        // TESTING space
-        let poolid = "";
-
-        if("0xAE85EC45034BD0A6e154c51BEDebEf6c07D45131".toLowerCase() == tokenAddress) {
-          poolid = "0x55ac2dfed28c703ae21f663edbb24b692095518b00020000000000000000013d";
-        }
 
         const node: CirclesNode = {
           avatar: backerAddress as Address,
           isGroup: false,
-          pools: [poolid],
+          pools: [],
           erc20tokenAddress: tokenAddress! as Address, // we know the tokenAddress must exist, since backing requires wrapping.
           lastUpdated: Date.now(),
         };
-        if("0xAE85EC45034BD0A6e154c51BEDebEf6c07D45131".toLowerCase() == tokenAddress?.toLowerCase()) {
-          nodes.push(node);
-
-          console.log("match found", node)
-        }
+        nodes.push(node);
       }
     }
-    // @todo understand why groups are not executed
-    // we then simply load all basegroups with an ERC20 token (as I currently don't have a simple way to tell which ones have liquidity)
+
     const baseGroups = await this.getBaseGroups();
     for (const group of baseGroups) {
       if (!group.mintHandler) {
@@ -501,25 +594,94 @@ export class DataInterface {
         continue;
       }
 
-      let poolid = "";
-      if("0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a".toLowerCase() == group.erc20tokenAddress.toLowerCase()) {
-        poolid = "0x5e08b6fe16f450668f38efa5493800dea392df8c000200000000000000000148";
-      }
-
       const node: CirclesNode = {
         avatar: group.address,
         isGroup: true,
-        pools: [poolid],
+        pools: [],
         erc20tokenAddress: group.erc20tokenAddress as Address,
         mintHandler: group.mintHandler,
         lastUpdated: Date.now(),
       };
-      if("0xa0ea681f5685bfa6857d776b5acbf3d51bbecc9a".toLowerCase() == group.erc20tokenAddress.toLowerCase()) {
-        nodes.push(node);
-      }
+      nodes.push(node);
+
     }
     if (limit) return nodes.slice(0, limit);
-    return nodes;
+    // @todo remove duplications
+    const poolsData = await this.getAllGnosisPools();
+
+    const allNodes = this.updateNodesWithPoolIds(nodes, poolsData);
+    //const rest = await this.quotePricesForAllNodes(allNodes);
+    //this.writeJsonToFile(rest, "log.json");
+    return allNodes;
+  }
+
+  
+  public writeJsonToFile(data: any, filename: string): void {
+    const jsonString = JSON.stringify(data, (key, value) =>
+      typeof value === 'bigint' ? value.toString() : value
+    , 2);
+    
+    writeFileSync(filename, jsonString, 'utf8');
+    console.log(`Saved to ${filename}`);
+  }
+
+
+  /**
+   * Quotes prices for all nodes and returns them in the specified JSON format
+   * @param nodes - Array of CirclesNode objects to quote prices for
+   * @param getCurrentSpotPrice - Function that returns spot price for a node
+   * @returns Promise<PriceOutput> - JSON object with prices for each token
+   */
+  
+  private async quotePricesForAllNodes(
+    nodes: CirclesNode[]
+  ) {
+    const priceResults = [];
+    
+    console.log(`Starting price quotation for ${nodes.length} nodes...`);
+    
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      console.log(`Quoting price for node ${i + 1}/${nodes.length}: ${node.erc20tokenAddress}`);
+      
+      try {
+        const price = await this.getOracleSpotPrice(node.erc20tokenAddress, node.pools?.[0] || "");
+        
+        // Find existing entry for this token address or create new one
+        let existingResult = priceResults.find(
+          result => result.erc20TokensAddress === node.erc20tokenAddress
+        );
+        
+        if (!existingResult) {
+          existingResult = {
+            erc20TokensAddress: node.erc20tokenAddress,
+            prices: []
+          };
+          priceResults.push(existingResult);
+        }
+        
+        // Add price if it's valid (not null)
+        if (price !== null) {
+          existingResult.prices.push(price);
+          console.log(`✓ Price found: ${price.toString()}`);
+        } else {
+          console.log(`⚠ No price available for ${node.erc20tokenAddress}`);
+        }
+        
+      } catch (error) {
+        console.error(`✗ Error getting price for ${node.erc20tokenAddress}:`, error);
+        // Continue with next node even if this one fails
+      }
+      
+      // Add small delay to avoid overwhelming the price oracle
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    console.log(`Price quotation complete. Found prices for ${priceResults.length} unique tokens.`);
+    
+    return {
+      prices: priceResults
+    };
   }
 
   public async fetchLatestLiquidityEstimates(): Promise<
@@ -628,10 +790,6 @@ export class DataInterface {
     }
   }
 
-  // private async checkIsGroup(address: string): Promise<boolean> {
-  //   return await hubV2Contract.isGroup(address);
-  // }
-
   public async getERC20Token(avatarAddress: string): Promise<string | null> {
     const tokenWrapperContract = new Contract(
       erc20LiftAddress,
@@ -650,7 +808,6 @@ export class DataInterface {
   }
 
   public async getMintHandler(group: Address): Promise<Address | null> {
-    console.log("input group", group);
     const groupContract = new Contract(
       group,
       baseGroupAbi,
@@ -658,7 +815,6 @@ export class DataInterface {
     );
     try {
       const mintHandler = await groupContract.BASE_MINT_HANDLER.staticCall();
-      console.log("result", mintHandler);
       if (mintHandler === ethers.ZeroAddress) {
         return null;
       }
@@ -706,6 +862,7 @@ export class DataInterface {
   }
 
   public async getOracleSpotPrice(tokenAddress: Address, poolId: string): Promise<bigint> {
+    console.log(tokenAddress, poolId)
     const amount = await arbbotOracle.getSwapQuoteToDAI.staticCall(tokenAddress, poolId, BigInt(1e18));
     console.log("extracted price", amount);
     return amount;
@@ -727,98 +884,6 @@ export class DataInterface {
     });
   }
 
-  public async getBotERC20BalanceWithRetry(
-    tokenAddress: Address,
-    maxRetries: number = 5,
-    delayMs: number = 2000,
-  ): Promise<bigint> {
-    for (let i = 0; i < maxRetries; i++) {
-      const balance = await this.getERC20Balance(tokenAddress, wallet.address as Address);
-      if (balance > 0n) {
-        return balance;
-      }
-      console.log(
-        `Attempt ${i + 1}: Balance still 0, waiting ${delayMs}ms before retry...`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-    return 0n;
-  }
-
-  public async getTradingQuote(params: {
-    tokenAddress: Address;
-    direction: Direction;
-    amount: bigint;
-  }): Promise<Swap | null> {
-    const targetToken = new Token(
-      chainId,
-      params.tokenAddress as Address,
-      18,
-      "Target Token",
-    );
-
-    let tokenIn;
-    let tokenOut;
-    if (params.direction == Direction.BUY) {
-      tokenIn = this.tradingToken;
-      tokenOut = targetToken;
-    } else if (params.direction == Direction.SELL) {
-      tokenIn = targetToken;
-      tokenOut = this.tradingToken;
-    } else {
-      console.error("ERROR: Unknown trade direction requested");
-      return null;
-    }
-
-    return this.fetchBalancerQuote({
-      tokenIn: tokenIn,
-      tokenOut: tokenOut,
-      direction: params.direction,
-      amount: params.amount,
-      logQuote: false, // we're only collecting price quotes for the quote reference token
-    });
-  }
-
-  private async convertTradingToQuoteAmount(
-    tradingAmount: bigint,
-  ): Promise<bigint> {
-    const rate = await this.updateTradingToQuoteRate();
-    return (tradingAmount * rate) / BigInt(this.tradingToken.decimals);
-  }
-
-  /**
-   * @notice Logs a trade opportunity to the database
-   * @param tradeOpportunity The trade opportunity to log
-   */
-  public async logTradeOpportunity(params: {
-    buyToken: string;
-    sellToken: string;
-    referenceToken: string;
-    buyAmount: bigint;
-    intermediateAmount: bigint;
-    sellAmount: bigint;
-    estimatedProfit: bigint;
-  }): Promise<void> {
-    try {
-      const profitInQuoteToken = await this.convertTradingToQuoteAmount(
-        params.estimatedProfit,
-      );
-
-      const logValues = [
-        Math.floor(Date.now() / 1000),
-        params.buyToken,
-        params.sellToken,
-        params.referenceToken,
-        params.buyAmount.toString(),
-        params.intermediateAmount.toString(),
-        params.sellAmount.toString(),
-        profitInQuoteToken.toString(),
-      ];
-      await this.loggerClient.query(logTradeInsertQuery, logValues);
-    } catch (error) {
-      console.error("Error logging trade opportunity:", error);
-    }
-  }
 
   public async logLiquidityEstimate(params: {
     sourceAvatar: string;
@@ -1022,108 +1087,14 @@ export class DataInterface {
     }
   }
 
-  /**
-   * Constructs the input parameters for executeSequentialBatchSwaps function
-   * @param {Object} trade - trade data
-   * @param {Object} demurragedAmount - The amount of demurraged crc
-   */
-  private async constructExecutionInput(
-    trade: Trade,
-    demurragedAmount: bigint,
-  ) {
-    // @todo fix type safety
-    // Validate required parameters
-    if (!trade || !demurragedAmount) {
-      throw new Error("Missing required parameters");
-    }
-    const buyQuote: any = trade.buyQuote;
-    const sellQuote: any = trade.sellQuote;
-    // Calculate deadline (1 hour from now)
-    const deadline = Math.floor(Date.now() / 1000) + 3600;
-    // Construct buySwap object
-    const buySwap = {
-      swapKind: buyQuote.swap.swapKind, // Usually 0 for GIVEN_IN or 1 for GIVEN_OUT
-      swaps: buyQuote.swap.swaps.map((swap: any) => ({
-        poolId: swap.poolId,
-        assetInIndex: Number(swap.assetInIndex || 0),
-        assetOutIndex: Number(swap.assetOutIndex || 0),
-        amount: swap.amount.toString(),
-        userData: swap.userData || "0x",
-      })),
-      assets: buyQuote.swap.assets,
-      funds: {
-        sender: middlewareAddress,
-        fromInternalBalance: false,
-        recipient: middlewareAddress,
-        toInternalBalance: false,
-      },
-      // Set appropriate limits based on expected amounts
-      limits: buyQuote.swap.assets.map((asset: Address) => {
-        if (asset === buyQuote.inputAmount.token.address) {
-          return (buyQuote.inputAmount.amount + PROFIT_THRESHOLD).toString();
-        }
-        return "0";
-      }),
-      deadline: deadline,
-    };
-
-    // Construct sellSwap object
-    const sellSwap = {
-      swapKind: sellQuote.swap.swapKind,
-      swaps: sellQuote.swap.swaps.map((swap: any) => ({
-        poolId: swap.poolId,
-        assetInIndex: Number(swap.assetInIndex || 0),
-        assetOutIndex: Number(swap.assetOutIndex || 0),
-        amount: swap.amount.toString(),
-        userData: swap.userData || "0x",
-      })),
-      assets: sellQuote.swap.assets,
-      funds: {
-        sender: middlewareAddress,
-        fromInternalBalance: false,
-        recipient: middlewareAddress,
-        toInternalBalance: false,
-      },
-      // Set appropriate limits based on expected amounts
-      limits: sellQuote.swap.assets.map((asset: Address) => {
-        // @todo these limits are insecure
-        if (asset === sellQuote.inputAmount.token.address) {
-          return sellQuote.inputAmount.amount.toString();
-        }
-        return "0";
-      }),
-      deadline: deadline,
-    };
-
-    // Prepare operateFlowMatrix Data
-    const pathFlow = await this.getPathfinderTransferData({
-      from: trade.buyNode,
-      to: trade.sellNode,
-      requestedAmount: demurragedAmount,
-    });
-
-    return [
-      buySwap.assets.indexOf(buyQuote.outputAmount.token.address),
-      buySwap,
-      sellSwap,
-      pathFlow
-        ? {
-            flowVertices: pathFlow.flowVertices,
-            flow: pathFlow.flowEdges,
-            streams: pathFlow.streams,
-            packedCoordinates: pathFlow.packedCoordinates,
-          }
-        : null,
-    ];
-  }
+  // @todo add checks like enough liquidity etc
   async executeWithV2(
     buyNode: CirclesNode,
     sellNode: CirclesNode,
-    requiredEth: bigint
+    requiredEth: bigint,
+    crcAmount: bigint
   ) {
-    // @todo add slight delta
-    const AMOUNT_TO_BUY = BigInt(1e18);
-    const demurragedAmount = CirclesConverter.attoStaticCirclesToAttoCircles(AMOUNT_TO_BUY);
+    const demurragedAmount = CirclesConverter.attoStaticCirclesToAttoCircles(crcAmount);
     const pathFlow = await this.getPathfinderTransferData({
       from: buyNode,
       to: sellNode,
@@ -1133,112 +1104,27 @@ export class DataInterface {
     console.log(requiredEth, demurragedAmount);
     console.dir(pathFlow, {depth: null});
 
-    
+    // @todo check which of conversion is redundunt
 
     const arbTx = await arbbotV2.executeArbitrageWithFlashLoan(
       buyNode.erc20tokenAddress,
       buyNode.pools?.[0],
       sellNode.erc20tokenAddress,
       sellNode.pools?.[0],
-      AMOUNT_TO_BUY,
-      requiredEth,
+      demurragedAmount,
+      requiredEth * BigInt(101) / BigInt(100), // @todo add slight slippage
       {
         flowVertices: pathFlow.flowVertices,
         flow: pathFlow.flowEdges,
         streams: pathFlow.streams,
         packedCoordinates: pathFlow.packedCoordinates,
       },
-      "0x40C8e83414dCa470B8BAD8a46C91837B80f960A4"
+      // @todo move to const
+      "0x0Bb4C6414e0d566d0F5cbEa10Ca695Dd9A3FFb97"
     );
     const recipt = await arbTx.wait();
     console.log(recipt);
-  }
-  async executeWithMiddleware(trade: Trade): Promise<boolean> {
-    try {
-      const middlewareContract = new Contract(
-        middlewareAddress,
-        middlewareAbi,
-        wallet,
-      );
-
-      const demurragedAmount = CirclesConverter.attoStaticCirclesToAttoCircles(trade.amount);
-
-      const [buyAssetIndex, buySwapData, sellSwapData, pathFlowData] =
-        await this.constructExecutionInput(trade, demurragedAmount);
-
-      if (!pathFlowData) {
-        console.log("Liquid path is not found");
-        return false;
-      }
-      const currentAllowance = await this.checkAllowance(
-        trade.buyQuote.inputAmount.token.address,
-        wallet.address,
-        middlewareAddress,
-      );
-      // check the current balance and the required amount
-      if (currentAllowance < buySwapData.limits[0] && pathFlowData) {
-        await this.approveTokens(
-          trade.buyQuote.inputAmount.token.address,
-          middlewareAddress,
-          BigInt(1e18) // Setup extremely huge allowance to avoid redundunt tx
-        );
-      }
-
-      const tx = await middlewareContract.executeSequentialBatchSwaps(
-        buyAssetIndex,
-        buySwapData,
-        sellSwapData,
-        pathFlowData,
-      );
-
-      const receipt = await tx.wait();
-      console.log("Execution finished: ", receipt);
-      return receipt.status === 1;
-    } catch (error: any) {
-      const errorData = error.data || error.error?.data;
-      if (error.code === "CALL_EXCEPTION" && errorData) {
-        // Get the contract interface for parsing
-        const contractInterface = new ethers.Interface(middlewareAbi);
-        // Parse the error data with the ABI
-        const decodedError = contractInterface.parseError(errorData);
-        if (decodedError?.name) {
-          console.error("Trade execution reverted: ", decodedError.name);
-        } else {
-          console.error("Trade execution reverted: UnknownCustomError");
-        }
-      } else {
-        console.error("Trade execution failed");
-        if (error?.transaction?.data) {
-          console.error("Calldata: ", error?.transaction?.data);
-        } else {
-          console.error(error);
-        }
-      }
-      return false;
-    }
-  }
-
-  /**
-   * @notice Checks the ERC20 token allowance for a given owner and spender.
-   * @param tokenAddress The ERC20 token contract address.
-   * @param ownerAddress The address owning the tokens.
-   * @param spenderAddress The address allowed to spend the tokens.
-   * @return {Promise<bigint>} A promise that resolves to the allowance as a bigint.
-   */
-  private async checkAllowance(
-    tokenAddress: string,
-    ownerAddress: string,
-    spenderAddress: string,
-  ): Promise<bigint> {
-    // Create a contract instance for the token
-    const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
-
-    // Fetch the allowance
-    const allowance = await tokenContract.allowance(
-      ownerAddress,
-      spenderAddress,
-    );
-    return allowance;
+    return true;
   }
 
   /**
@@ -1270,64 +1156,159 @@ export class DataInterface {
   }
 
   /**
-   * @notice Converts a demurrage token amount to its corresponding inflationary value.
-   * @param tokenAddress The address of the inflationary token.
-   * @param amount The amount to convert.
-   * @return {Promise<bigint>} A promise that resolves to the converted inflationary value.
+   * Get all pools on Gnosis chain in batches
+   * @returns {Promise<Object[]>} Promise resolving to array of all pool objects
    */
-  public async convertDemurrageToInflationary(
-    tokenAddress: string,
-    amount: bigint,
-  ): Promise<bigint> {
-    const inflationaryTokenContract = new Contract(
-      tokenAddress,
-      inflationaryTokenAbi,
-      wallet,
-    );
-    const days = await inflationaryTokenContract.day(
-      (await provider.getBlock("latest"))?.timestamp,
-    );
-    const inflationaryValue =
-      await inflationaryTokenContract.convertDemurrageToInflationaryValue(
-        amount,
-        days,
-      );
-
-    return inflationaryValue;
+  // @todo update function to filter out tokens if there is no path set for such contracts
+  public async getAllGnosisPools() {
+    const BATCH_SIZE = 1000;
+    const allPools = [];
+    
+    try {
+      // First, get the total count of pools
+      const totalCount = await this.getGnosisPoolsCount();
+      console.log(`Total pools to fetch: ${totalCount}`);
+      
+      // Calculate number of batches needed
+      const totalBatches = Math.ceil(totalCount / BATCH_SIZE);
+      console.log(`Fetching pools in ${totalBatches} batches of ${BATCH_SIZE}`);
+      
+      // Fetch pools in batches
+      for (let batch = 0; batch < totalBatches; batch++) {
+        const skip = batch * BATCH_SIZE;
+        console.log(`Fetching batch ${batch + 1}/${totalBatches} (skip: ${skip}, first: ${BATCH_SIZE})`);
+        
+        const batchPools = await this.getGnosisPoolsBatch(BATCH_SIZE, skip);
+        allPools.push(...batchPools);
+        
+        // Optional: Add a small delay between requests to be respectful to the API
+        if (batch < totalBatches - 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      
+      console.log(`Successfully fetched ${allPools.length} pools`);
+      return allPools;
+      
+    } catch (error) {
+      console.error('Error fetching all Gnosis pools:', error);
+      throw error;
+    }
   }
 
-  private async updateTradingToQuoteRate(): Promise<bigint> {
-    const currentTime = Date.now();
-
-    // Return cached rate if it's fresh enough
-    if (
-      this.tradingToQuoteRate !== null &&
-      currentTime - this.lastRateUpdate < this.RATE_UPDATE_INTERVAL
-    ) {
-      return this.tradingToQuoteRate;
-    }
-
-    // Fetch new rate using balancer quote
-    const quote = await this.fetchBalancerQuote({
-      tokenIn: this.tradingToken,
-      tokenOut: this.quotingToken,
-      direction: Direction.SELL,
-      amount: BigInt(10 ** this.tradingToken.decimals), // Use 1 full unit of trading token as reference
-      logQuote: false, // Don't log these routine price checks
-      skipSwapCallPreparation: true
-    });
-
-    if (!quote) {
-      // If we can't get a new quote but have an old rate, use that
-      if (this.tradingToQuoteRate !== null) {
-        return this.tradingToQuoteRate;
+  /**
+   * Get the total count of pools on Gnosis chain
+   * @returns {Promise<number>} Promise resolving to total pool count
+   */
+  private async getGnosisPoolsCount() {
+    const query = `
+      query GetGnosisPoolsCount {
+        poolGetPoolsCount(
+          where: {
+            chainIn: [GNOSIS]
+            protocolVersionIn: [2]
+          }
+        ) 
       }
-      throw new Error("Failed to fetch trading to quote token rate");
+    `;
+    
+    try {
+      const response = await fetch(BALANCER_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      
+      if (result.errors) {
+        throw new Error(`GraphQL error: ${result.errors[0].message}`);
+      }
+      
+      return result.data.poolGetPoolsCount;
+      
+    } catch (error) {
+      console.error('Error fetching pool count:', error);
+      throw error;
     }
+  }
 
-    this.tradingToQuoteRate = quote.outputAmount.amount;
-    this.lastRateUpdate = currentTime;
-
-    return this.tradingToQuoteRate;
+  /**
+   * Get a batch of pools from Gnosis chain
+   * @param {number} first - Number of pools to fetch
+   * @param {number} skip - Number of pools to skip
+   * @returns {Promise<Object[]>} Promise resolving to array of pool objects
+   */
+  private async getGnosisPoolsBatch(first: number, skip: number) {
+    const query = `
+      query GetGnosisPools($first: Int!, $skip: Int!) {
+        poolGetPools(
+          where: {
+            chainIn: [GNOSIS]
+            protocolVersionIn: [2]
+          }
+          first: $first
+          skip: $skip
+          orderBy: totalLiquidity
+          orderDirection: desc
+        ) {
+          id
+          address
+          name
+          symbol
+          type
+          dynamicData {
+            totalLiquidity
+            volume24h
+          }
+          poolTokens {
+            address
+            symbol
+            name
+            balance
+            weight
+            decimals
+          }
+        }
+      }
+    `;
+    
+    try {
+      const response = await fetch(BALANCER_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query,
+          variables: {
+            first,
+            skip
+          }
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      
+      if (result.errors) {
+        throw new Error(`GraphQL error: ${result.errors[0].message}`);
+      }
+      
+      return result.data.poolGetPools;
+      
+    } catch (error) {
+      console.error('Error fetching pool batch:', error);
+      throw error;
+    }
   }
 }
