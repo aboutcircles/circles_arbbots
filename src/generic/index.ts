@@ -1,4 +1,5 @@
 import { DirectedGraph } from "graphology";
+import { CirclesConverter, cidV0ToUint8Array } from "@circles-sdk/utils";
 import { DataInterface } from "./dataInterface.js";
 import {
   CirclesNode,
@@ -18,6 +19,7 @@ import {
   MIN_BUYING_AMOUNT,
   NODE_LIMIT,
   PROFIT_THRESHOLD,
+  MAX_ARBITRAGE_CRC_AMOUNT,
   QUERY_REFERENCE_AMOUNT,
   QUOTE_TOKEN,
   QUOTE_TOKEN_DEMICALS,
@@ -32,7 +34,7 @@ class ArbitrageBot {
   private dataInterface: DataInterface;
   // Failed edge props
   private failedEdges: Map<string, number> = new Map(); // edgeKey -> timestamp when it failed
-  private readonly COOLDOWN_PERIOD = 5 * 60 * 1000; // 5 minutes in milliseconds
+  private readonly COOLDOWN_PERIOD = 30 * 60 * 1000; // 5 minutes in milliseconds
   private readonly MAX_CONSECUTIVE_FAILURES = 3; // Max failures before longer cooldown
   private edgeFailureCount: Map<string, number> = new Map(); // Track consecutive failures
 
@@ -234,11 +236,12 @@ class ArbitrageBot {
     // to deal with situations in which the prices aren't defined,
     // we choose to crop negative scores to 0, as there would not
     // be good deals to begin with
+
     if (!sourcePrice || !targetPrice) {
       return 0n;
     }
     const delta = targetPrice - sourcePrice;
-    return delta <= 0 ? 0n : delta * liquidity;
+    return delta <= 0 ? 0n : delta;// * liquidity;
   }
 
   private calculateNorm(scores: bigint[]): bigint {
@@ -270,7 +273,7 @@ class ArbitrageBot {
       if (!failureTime) return true; // Never failed, available
       
       const failureCount = this.edgeFailureCount.get(edge) || 0;
-      const cooldownMultiplier = Math.min(failureCount, 5); // Cap at 5x cooldown
+      const cooldownMultiplier = Math.min(failureCount, 100); // Cap at 5x cooldown
       const effectiveCooldown = this.COOLDOWN_PERIOD * cooldownMultiplier;
       
       return (currentTime - failureTime) > effectiveCooldown;
@@ -327,7 +330,7 @@ class ArbitrageBot {
   // Method to clean up old failures (call periodically)
   private cleanupOldFailures(): void {
     const currentTime = Date.now();
-    const maxCooldown = this.COOLDOWN_PERIOD * 5; // Maximum possible cooldown
+    const maxCooldown = this.COOLDOWN_PERIOD * 100; // Maximum possible cooldown
     
     for (const [edgeKey, failureTime] of this.failedEdges.entries()) {
       if (currentTime - failureTime > maxCooldown) {
@@ -376,60 +379,45 @@ class ArbitrageBot {
     };
   }
 
-  // Modified executeArbitrageRound method
   private async executeArbitrageRound(): Promise<void> {
     console.log("\nStarting new arbitrage round...");
     
-    // Clean up old failures periodically
     if (Math.random() < 0.1) { // 10% chance each round
       //this.cleanupOldFailures();
     }
     
     const edgeKey = this.selectNextEdge();
-
     console.log("Winning edge score:", this.scoreEdge(edgeKey));
     console.log("Updating values for selected edge: ", edgeKey);
     
     try {
       const updatedEdgeInfo = await this.updateValues(edgeKey);
+      // Simple price check - source should be higher than target for profitable arbitrage
+      if (!updatedEdgeInfo.source.price || !updatedEdgeInfo.target.price) {
+        console.log("Missing price data for nodes");
+        this.markEdgeAsFailed(edgeKey);
+        return;
+      }      
+      //@todo inspect why such trades are not executed
+      if (updatedEdgeInfo.source.price * 13n / 10n > updatedEdgeInfo.target.price) {
+        console.log(`Price check failed: source ${updatedEdgeInfo.source.price}, target ${updatedEdgeInfo.target.price}`);
+        this.markEdgeAsFailed(edgeKey);
+        return;
+      }
 
-      console.log("Calculating optimal trade...");
-      const optimalTrade = await this.oracleCalculateOptimalTrade(
-        updatedEdgeInfo.source,
-        updatedEdgeInfo.target,
-        updatedEdgeInfo.edge.liquidity,
+      console.log("Price check passed, proceeding to execution...");
+      
+      // Execute arbitrage with dynamic optimization
+      const executionSuccess = await this.executeArbitrage(
+        updatedEdgeInfo.source, 
+        updatedEdgeInfo.target
       );
-
-      console.log("liquidity info and optimal trade: ", updatedEdgeInfo.edge.liquidity, optimalTrade);
-
-      const profit = BigInt(optimalTrade[2]);
-      if (optimalTrade[1]) {
-        console.log(`Found trade with profit: ${profit.toString()}`);
-
-        if (profit > BigInt(1e14)) {
-          console.log("Trade exceeds profit threshold, executing...");
-          
-          // Try to execute the trade
-          const executionSuccess = await this.executeArbitrage(
-            updatedEdgeInfo.source, 
-            updatedEdgeInfo.target, 
-            optimalTrade[3],
-            optimalTrade[0]
-          );
-          
-          if (executionSuccess) {
-            console.log("Trade executed successfully");
-            this.markEdgeAsSuccessful(edgeKey);
-          } else {
-            console.log("Trade execution failed");
-            this.markEdgeAsFailed(edgeKey);
-          }
-        } else {
-          console.log("Trade below profit threshold, skipping execution");
-          // Don't mark as failed if it's just unprofitable
-        }
+      
+      if (executionSuccess) {
+        console.log("Trade executed successfully");
+        this.markEdgeAsSuccessful(edgeKey);
       } else {
-        console.log("No viable trade found");
+        console.log("Trade execution failed");
         this.markEdgeAsFailed(edgeKey);
       }
     } catch (error) {
@@ -470,7 +458,8 @@ class ArbitrageBot {
         lastUpdated: Date.now(),
       };
     });
-
+    // @todo skip this step
+    /*
     const currentEdgeLiquidity = await this.getCurrentLiquidity(
       edgeInfo.source,
       edgeInfo.target,
@@ -492,7 +481,7 @@ class ArbitrageBot {
         liquidity: currentEdgeLiquidity,
         lastUpdated: Date.now(),
       };
-    });
+    });*/
 
     return this.getEdgeInfo(edgeKey);
   }
@@ -530,111 +519,101 @@ class ArbitrageBot {
   }
 
   private async getCurrentSpotPrice(node: CirclesNode): Promise<bigint | null> {
+    if(!node.pools?.[0]) 
+      return 0n;
+
     const spotPrice = await this.dataInterface.getOracleSpotPrice(
       node.erc20tokenAddress,
-      node.pools?.[0] || ""
+      node.pools?.[0]
     )
 
     return BigInt(spotPrice);
-    /*
-    const swapData = await this.dataInterface.getSpotPrice(
-      node.erc20tokenAddress,
-    );    
-    if (!swapData) {
-      return null;
-    }
-    return swapData.inputAmount.amount;
-    */
-  }
-
-  private async getCurrentLiquidity(
-    source: CirclesNode,
-    target: CirclesNode,
-  ): Promise<bigint | null> {
-    return this.dataInterface.getSimulatedLiquidity(source, target);
-  }
-
-  private async oracleCalculateOptimalTrade(
-    source: CirclesNode,
-    target: CirclesNode,
-    liquidity: bigint
-  ): Promise<[bigint, boolean, bigint, bigint]> { // Returns [requiredCRCAmount, isProfitable, profitInWstETH, wstETHNeeded]
-    console.log("liquidity: ", liquidity);
-    console.log("source and target initial price: ", source?.price, target?.price);
-    if (
-      liquidity < BigInt(1e18) || !source.pools?.[0] || !target.pools?.[0] ||
-      (source?.price > target?.price)
-    ) {
-      return [BigInt(0), false, BigInt(0), BigInt(0)];
-    }
-
-    let currentAmount = BigInt(1e18); // Start with 1 CRC (1e18 wei)
-    let lastProfitableAmount = BigInt(0);
-    let lastProfitableResult: [boolean, bigint, bigint] = [false, BigInt(0), BigInt(0)];
-
-    // Keep doubling until we exceed liquidity or find unprofitable trade
-    // @todo limit extra huge transfers `currentAmount < BigInt(1e20)`
-    while (currentAmount <= liquidity && currentAmount < BigInt(1e20)) {
-      console.log(`Testing amount: ${currentAmount.toString()}`);
-      
-      try {
-        const executionData = await this.dataInterface.getTradeCalculation(
-          source.erc20tokenAddress,
-          source.pools[0],
-          target.erc20tokenAddress,
-          target.pools[0],
-          currentAmount
-        );
-
-        const [isProfitable, profitInWstETH, wstETHNeeded] = executionData;
-        
-        if (isProfitable) {
-          // Store the last profitable result
-          lastProfitableAmount = currentAmount;
-          lastProfitableResult = [isProfitable, profitInWstETH, wstETHNeeded];
-          
-          // Double the amount for next iteration
-          currentAmount = currentAmount * BigInt(2);
-        } else {
-          // Trade became unprofitable, break the loop
-          console.log(`Trade became unprofitable at amount: ${currentAmount.toString()}`);
-          break;
-        }
-      } catch (error) {
-        // @dev its part of regular flow
-        console.log(`Error calculating trade for amount ${currentAmount.toString()}`);
-        break;
-      }
-    }
-    
-    if (currentAmount > liquidity && lastProfitableAmount > BigInt(0)) {
-      console.log(`Exceeded liquidity. Last profitable amount: ${lastProfitableAmount.toString()}`);
-    }
-    
-    // Return the optimal (last profitable) result
-    return [
-      lastProfitableAmount,
-      lastProfitableResult[0],
-      lastProfitableResult[1],
-      lastProfitableResult[2]
-    ];
   }
 
   async executeArbitrage(
     source: CirclesNode,
-    target: CirclesNode,
-    wstToSpend: bigint,
-    crcAmount: bigint = BigInt(1e18)
+    target: CirclesNode
   ) {
     try {
-      const result = await this.dataInterface.executeWithV2(
+      // @todo move to const
+      // Step 2: Get actual liquidity after trust setup
+      console.log("Getting current liquidity...");
+      const actualLiquidity = await this.dataInterface.getPathfinderTransferData(
         source,
         target,
-        wstToSpend,
-        crcAmount
+        CirclesConverter.attoStaticCirclesToAttoCircles(MAX_ARBITRAGE_CRC_AMOUNT),
+        true
       );
+      // @todo implement the update of the liquidity edge
+      /*this.graph.updateEdgeAttributes(edgeKey, (attr) => {
+        return {
+          ...attr,
+          liquidity: currentEdgeLiquidity,
+          lastUpdated: Date.now(),
+        };
+      });*/
+      
+      if (!actualLiquidity || actualLiquidity < BigInt(1e18)) {
+        console.log(`Insufficient liquidity: ${actualLiquidity?.toString() || '0'}`);
+        return false;
+      }
 
-      return result !== undefined && result !== null;
+      console.log(`Available liquidity: ${actualLiquidity.toString()}`);
+      // Step 3: Find optimal trade amount with binary search approach
+      let currentAmount = CirclesConverter.attoCirclesToAttoStaticCircles(BigInt(actualLiquidity));//BigInt(1e18); // Start with 1 CRC
+      let bestAmount = BigInt(0);
+      let bestWstETHNeeded = BigInt(0);
+
+      // Start with doubling until we hit liquidity limit or find unprofitable trade
+      // @todo we need to restricthe max amount to avoid the huge paths
+      // @todo double down instead of double up
+      while (currentAmount > BigInt(1e18)) {
+        console.log(`Testing amount: ${currentAmount.toString()}`);
+        
+        try {
+          const [isProfitable, profitInWstETH, wstETHNeeded] = await this.dataInterface.getTradeCalculation(
+            source.erc20tokenAddress,
+            source.pools?.[0] || "",
+            target.erc20tokenAddress,
+            target.pools?.[0] || "",
+            currentAmount
+          );
+
+          // @todo get threashold profit from const
+          if (isProfitable && profitInWstETH > BigInt(1e13)) { // Minimum profit threshold
+            bestAmount = currentAmount;
+            bestWstETHNeeded = wstETHNeeded;
+            console.log(`Profitable trade found: amount=${currentAmount.toString()}, profit=${profitInWstETH.toString()}, wstETH needed=${wstETHNeeded.toString()}`);
+            
+            break;
+          } else {
+            console.log(`Trade not profitable at amount: ${currentAmount.toString()}`);
+            break;
+          }
+        } catch {
+          console.log(`Unable to get the trade calculation, amount=${currentAmount.toString()}`);
+          currentAmount = currentAmount / BigInt(2);
+          //124 999 999 978 759 738 394
+        }
+      }
+
+      // Step 4: Execute the best trade found
+      if (bestAmount > BigInt(0) && bestWstETHNeeded > BigInt(0)) {
+        console.log(`Executing optimal trade: amount=${bestAmount.toString()}, wstETH=${bestWstETHNeeded.toString()}`);
+        
+        const result = await this.dataInterface.executeWithV2(
+          source,
+          target,
+          bestWstETHNeeded,
+          bestAmount
+        );
+
+        return result !== undefined && result !== null;
+      } else {
+        console.log("No profitable trade found after optimization");
+        return false;
+      }
+
     } catch (error) {
       console.error("Trade execution failed:", error);
       return false;

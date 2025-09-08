@@ -34,8 +34,7 @@ import {
   LatestPriceRow,
   TrustRelationRow,
   Address,
-  DataInterfaceParams,
-  Trade,
+  DataInterfaceParams
 } from "./interfaces/index.js";
 
 // ABI
@@ -57,6 +56,7 @@ import {
   arbbotOracleAddress,
   arbbotV2Address,
   BALANCER_VAULT,
+  MAX_ARBITRAGE_CRC_AMOUNT,
   PROFIT_THRESHOLD,
   logQuoteInsertQuery,
   logTradeInsertQuery,
@@ -397,7 +397,7 @@ export class DataInterface {
    * @param toTokens address to establish trust with
    * @return {Promise<boolean>} Returns true if rust relationships is successfully established
    */
-  private async updateMiddlewareTrust(tokenAvatar: string): Promise<boolean> {
+  public async updateMiddlewareTrust(tokenAvatar: string): Promise<boolean> {
     try {
       // Check if trust already exists
       const isTrusted = await hubV2Contract.isTrusted(
@@ -605,13 +605,17 @@ export class DataInterface {
       nodes.push(node);
 
     }
-    if (limit) return nodes.slice(0, limit);
-    // @todo remove duplications
     const poolsData = await this.getAllGnosisPools();
-
-    const allNodes = this.updateNodesWithPoolIds(nodes, poolsData);
-    //const rest = await this.quotePricesForAllNodes(allNodes);
-    //this.writeJsonToFile(rest, "log.json");
+    let allNodes;
+    // @todo remove duplications
+    if (limit) {
+      const activeNodes = nodes.slice(0, limit);
+      allNodes = this.updateNodesWithPoolIds(activeNodes, poolsData);
+    } else {
+      allNodes = this.updateNodesWithPoolIds(nodes, poolsData);
+    }
+    const rest = await this.quotePricesForAllNodes(allNodes);
+    this.writeJsonToFile(rest, "log.json");
     return allNodes;
   }
 
@@ -864,7 +868,6 @@ export class DataInterface {
   public async getOracleSpotPrice(tokenAddress: Address, poolId: string): Promise<bigint> {
     console.log(tokenAddress, poolId)
     const amount = await arbbotOracle.getSwapQuoteToDAI.staticCall(tokenAddress, poolId, BigInt(1e18));
-    console.log("extracted price", amount);
     return amount;
   }
 
@@ -1000,66 +1003,52 @@ export class DataInterface {
     return result;
   }
 
-  /**
-   * @notice Approves a specified token for spending by a designated operator.
-   * @param tokenAddress The ERC20 token address.
-   * @param operatorAddress The address to be approved.
-   * @param amount The allowance amount (default is MAX_ALLOWANCE_AMOUNT).
-   * @return {Promise<void>}
-   */
-  private async approveTokens(
-    tokenAddress: string,
-    operatorAddress: string,
-    amount: bigint,
+  public async getPathfinderTransferData(
+    from: CirclesNode,
+    to: CirclesNode,
+    amount: bigint = MAX_ARBITRAGE_CRC_AMOUNT, // @todo move to const
+    onlyMaxFlow: boolean = false
   ) {
-    const groupTokenContract = new Contract(tokenAddress, erc20Abi, wallet);
-    const approveTx = await groupTokenContract.approve(operatorAddress, amount);
-    await approveTx.wait();
-  }
-
-  public async getPathfinderTransferData(params: {
-    from: CirclesNode;
-    to: CirclesNode;
-    requestedAmount: bigint;
-  }) {
     try {
       // we assume that the max flow from the deal findingis still uptodate
       // so we don't actually update this here.
-      const toAddress = params.to.isGroup
-        ? params.to.mintHandler!
+      const toAddress = to.isGroup
+        ? to.mintHandler!
         : arbbotV2Address;
-      const toTokens = params.to.isGroup ? undefined : [params.to.avatar];
+      const toTokens = to.isGroup ? undefined : [to.avatar];
 
-      if (!params.to.isGroup) {
-        console.log("Forcing trust for ", params.to.avatar);
+      if (!to.isGroup) {
+        console.log("Forcing trust for ", to.avatar);
         // @todo rework logic to trust during the sc call
-        const trustUpdated = await this.updateMiddlewareTrust(params.to.avatar);
+        const trustUpdated = await this.updateMiddlewareTrust(to.avatar);
         if (!trustUpdated) {
           console.log("Failed to update middleware trust relationships");
           return null;
         }
       }
-
-      const maxHolder = await this.getMaxHolder(params.from.avatar);
+      const maxHolder = await this.getMaxHolder(from.avatar);
       console.log(
         "pathfinder args",
         maxHolder,
         toAddress,
-        params.requestedAmount.toString(),
+        amount,
         false,
-        [params.from.avatar],
+        [from.avatar],
         toTokens
       )
+
       const buildPath = await this.sdk.v2Pathfinder.getPath(
         maxHolder,
         toAddress,
-        params.requestedAmount.toString(),
+        amount.toString(),
         false,
-        [params.from.avatar],
+        [from.avatar],
         toTokens,
       );
 
-      console.log(buildPath);
+      if(onlyMaxFlow) {
+        return !buildPath.maxFlow ? 0n : buildPath.maxFlow;
+      }
 
       const theFlow = createFlowMatrix(
         arbbotV2Address,
@@ -1095,11 +1084,11 @@ export class DataInterface {
     crcAmount: bigint
   ) {
     const demurragedAmount = CirclesConverter.attoStaticCirclesToAttoCircles(crcAmount);
-    const pathFlow = await this.getPathfinderTransferData({
-      from: buyNode,
-      to: sellNode,
-      requestedAmount: demurragedAmount,
-    });
+    const pathFlow = await this.getPathfinderTransferData(
+      buyNode,
+      sellNode,
+      demurragedAmount,
+    );
     console.log("execution data");
     console.log(requiredEth, demurragedAmount);
     console.dir(pathFlow, {depth: null});
