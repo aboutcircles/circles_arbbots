@@ -91,6 +91,37 @@ export interface DataInterfaceParams {
   logActivity: boolean;
   quotingToken: Address;
   collateralTokenDecimals: number;
-  tradingToken: Address;
-  tradingTokenDecimals: number;
+}
+
+export interface PoolToken {
+  address: Address;
+  symbol: string;
+  name: string;
+  balance: string;
+  weight: string;
+  decimals: number;
+}
+
+export interface PoolDynamicData {
+  totalLiquidity: string;
+  volume24h: string;
+}
+
+export interface BalancerPool {
+  id: string;
+  address: Address;
+  name: string;
+  symbol: string;
+  type: string;
+  dynamicData: PoolDynamicData;
+  poolTokens: PoolToken[];
+}
+
+export interface PriceResult {
+  erc20TokensAddress: string;
+  prices: bigint[];
+}
+
+export interface QuotePricesResult {
+  prices: PriceResult[];
 }

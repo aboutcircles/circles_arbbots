@@ -24,8 +24,6 @@ import {
   QUOTE_TOKEN,
   QUOTE_TOKEN_DEMICALS,
   RESYNC_INTERVAL,
-  TRADING_TOKEN,
-  TRADING_TOKEN_DECIMALS,
 } from "./helpers/constants.js";
 
 class ArbitrageBot {
@@ -47,8 +45,6 @@ class ArbitrageBot {
       logActivity: LOG_ACTIVITY,
       quotingToken: QUOTE_TOKEN,
       collateralTokenDecimals: QUOTE_TOKEN_DEMICALS,
-      tradingToken: TRADING_TOKEN,
-      tradingTokenDecimals: TRADING_TOKEN_DECIMALS,
     });
   }
 
@@ -533,9 +529,8 @@ class ArbitrageBot {
   async executeArbitrage(
     source: CirclesNode,
     target: CirclesNode
-  ) {
+  ): Promise<boolean> {
     try {
-      // @todo move to const
       // Step 2: Get actual liquidity after trust setup
       console.log("Getting current liquidity...");
       const actualLiquidity = await this.dataInterface.getPathfinderTransferData(
@@ -552,22 +547,20 @@ class ArbitrageBot {
           lastUpdated: Date.now(),
         };
       });*/
-      
-      if (!actualLiquidity || actualLiquidity < BigInt(1e18)) {
+      // @todo QUERY_REFERENCE_AMOUNT is not demurrage
+      if (!actualLiquidity || actualLiquidity < QUERY_REFERENCE_AMOUNT) {
         console.log(`Insufficient liquidity: ${actualLiquidity?.toString() || '0'}`);
         return false;
       }
 
       console.log(`Available liquidity: ${actualLiquidity.toString()}`);
-      // Step 3: Find optimal trade amount with binary search approach
-      let currentAmount = CirclesConverter.attoCirclesToAttoStaticCircles(BigInt(actualLiquidity));//BigInt(1e18); // Start with 1 CRC
+      // Step 3: Find optimal trade amount with doubledown binary search approach
+      let currentAmount = CirclesConverter.attoCirclesToAttoStaticCircles(BigInt(actualLiquidity));
       let bestAmount = BigInt(0);
       let bestWstETHNeeded = BigInt(0);
 
       // Start with doubling until we hit liquidity limit or find unprofitable trade
-      // @todo we need to restricthe max amount to avoid the huge paths
-      // @todo double down instead of double up
-      while (currentAmount > BigInt(1e18)) {
+      while (currentAmount > QUERY_REFERENCE_AMOUNT) {
         console.log(`Testing amount: ${currentAmount.toString()}`);
         
         try {
@@ -579,8 +572,7 @@ class ArbitrageBot {
             currentAmount
           );
 
-          // @todo get threashold profit from const
-          if (isProfitable && profitInWstETH > BigInt(1e13)) { // Minimum profit threshold
+          if (isProfitable && profitInWstETH > PROFIT_THRESHOLD) { // Minimum profit threshold
             bestAmount = currentAmount;
             bestWstETHNeeded = wstETHNeeded;
             console.log(`Profitable trade found: amount=${currentAmount.toString()}, profit=${profitInWstETH.toString()}, wstETH needed=${wstETHNeeded.toString()}`);
@@ -623,7 +615,7 @@ class ArbitrageBot {
 
   // this is inefficient in the sense that it throws away the whole learned graph and then just reloads
   // the majority of it from the db, however it's a simple way to include new backers and new groups.
-  private async resyncGraph() {
+  private async resyncGraph(): Promise<void> {
     console.log("Resyncing graph...");
     this.graph = new DirectedGraph();
     await this.initializeGraph();
@@ -648,7 +640,7 @@ class ArbitrageBot {
   }
 }
 
-async function main() {
+async function main(): Promise<void> {
   try {
     const bot = new ArbitrageBot(EXPLORATION_RATE);
     await bot.init();

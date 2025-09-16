@@ -34,7 +34,10 @@ import {
   LatestPriceRow,
   TrustRelationRow,
   Address,
-  DataInterfaceParams
+  DataInterfaceParams,
+  BalancerPool,
+  PriceResult,
+  QuotePricesResult
 } from "./interfaces/index.js";
 
 // ABI
@@ -52,14 +55,13 @@ import {
 import {
   DemurragedVSInflation,
   erc20LiftAddress,
-  middlewareAddress,
   arbbotOracleAddress,
   arbbotV2Address,
   BALANCER_VAULT,
   MAX_ARBITRAGE_CRC_AMOUNT,
   PROFIT_THRESHOLD,
   logQuoteInsertQuery,
-  logTradeInsertQuery,
+  supportedTokens,
   logLiquidityEstimateQuery,
   BALANCER_API_URL
 } from "./helpers/constants.js";
@@ -103,12 +105,6 @@ const hubV2Contract = new Contract(
   wallet,
 );
 
-const middlewareContract = new Contract(
-  middlewareAddress,
-  middlewareAbi,
-  wallet,
-);
-
 const arbbotOracle = new Contract(
   arbbotOracleAddress,
   arbbotOracleAbi,
@@ -124,7 +120,6 @@ export class DataInterface {
   private loggerClient: pg.Client;
   public quoteReferenceAmount: bigint;
   public quotingToken: Token;
-  public tradingToken: Token;
   public logActivity: boolean;
   public sdk?: Sdk;
   public sdkAvatar?: Avatar;
@@ -160,14 +155,6 @@ export class DataInterface {
       params.quotingToken,
       Number(params.collateralTokenDecimals),
       "Quote Token",
-    );
-
-    console.log("loading trading token", params.tradingToken);
-    this.tradingToken = new Token(
-      chainId,
-      params.tradingToken,
-      Number(params.tradingTokenDecimals),
-      "Trading Token",
     );
 
     this.logActivity = params.logActivity;
@@ -466,26 +453,19 @@ export class DataInterface {
    * @param {Object[]} pools - Array of pool objects from Balancer
    * @returns {Object[]} Updated nodes array with pool IDs populated
    */
-  private updateNodesWithPoolIds(nodes: any, pools: any) {
+  private updateNodesWithPoolIds(nodes: CirclesNode[], pools: BalancerPool[]): CirclesNode[] {
     if (!nodes || !Array.isArray(nodes)) {
       console.warn('Invalid nodes array provided');
       return [];
     }
-    
+
     if (!pools || !Array.isArray(pools)) {
       console.warn('Invalid pools array provided');
       return nodes;
     }
 
     console.log(`Updating ${nodes.length} nodes with pool IDs from ${pools.length} available pools`);
-    // @todo move to const
-    const supportedTokens: Address[] = [
-      "0xaf204776c7245bF4147c2612BF6e5972Ee483701", // sDAI
-      "0x6A023CCd1ff6F2045C3309768eAd9E68F978f6e1", // WETH
-      "0x6C76971f98945AE98dD7d4DFcA8711ebea946eA6", // wstETH
-      "0x8e5bBbb09Ed1ebdE8674Cda39A0c169401db4252", // WBTC
-      "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb" // GNO
-    ];
+
     // Convert supportedTokens to lowercase for case-insensitive comparison
     const supportedTokensLower = supportedTokens.map(token => token.toLowerCase());
 
@@ -557,15 +537,12 @@ export class DataInterface {
     return updatedNodes;
   }
 
-  //@todo fix types
-  public async loadNodes(limit?: number): Promise<any[]> {
+  public async loadNodes(limit?: number): Promise<CirclesNode[]> {
     const nodes: CirclesNode[] = [];
     if(process.env.ONLY_GROUPS !== "true") {
-      console.log(process.env.ONLY_GROUPS)
       // we first get individual CRCs that are backers
       const backerAddresses = await this.getCurrentBackers();
       for (const backerAddress of backerAddresses) {
-        // const isGroup = await this.checkIsGroup(backerAddress as string);
         const tokenAddress = await this.getERC20Token(backerAddress);
 
         const node: CirclesNode = {
@@ -586,7 +563,7 @@ export class DataInterface {
         if(!mintHandler) continue;
         group.mintHandler = mintHandler;
       };
-      
+
       // Check if there is a group token in the balancerV2 vault
       const balancerVaultV2Balance = await this.getERC20Balance(group.erc20tokenAddress as Address, BALANCER_VAULT);
       // @todo extend support for v3 in the future
@@ -606,22 +583,18 @@ export class DataInterface {
 
     }
     const poolsData = await this.getAllGnosisPools();
-    let allNodes;
-    // @todo remove duplications
-    if (limit) {
-      const activeNodes = nodes.slice(0, limit);
-      allNodes = this.updateNodesWithPoolIds(activeNodes, poolsData);
-    } else {
-      allNodes = this.updateNodesWithPoolIds(nodes, poolsData);
-    }
-    const rest = await this.quotePricesForAllNodes(allNodes);
-    this.writeJsonToFile(rest, "log.json");
+    // Apply limit and update nodes with pool IDs in one step
+    const nodesToProcess = limit ? nodes.slice(0, limit) : nodes;
+    const allNodes = this.updateNodesWithPoolIds(nodesToProcess, poolsData);
+
+    //const rest = await this.quotePricesForAllNodes(allNodes);
+    //this.writeJsonToFile(rest, "log.json");
     return allNodes;
   }
 
   
   public writeJsonToFile(data: any, filename: string): void {
-    const jsonString = JSON.stringify(data, (key, value) =>
+    const jsonString = JSON.stringify(data, (_key, value) =>
       typeof value === 'bigint' ? value.toString() : value
     , 2);
     
@@ -633,14 +606,12 @@ export class DataInterface {
   /**
    * Quotes prices for all nodes and returns them in the specified JSON format
    * @param nodes - Array of CirclesNode objects to quote prices for
-   * @param getCurrentSpotPrice - Function that returns spot price for a node
-   * @returns Promise<PriceOutput> - JSON object with prices for each token
+   * @returns Promise<QuotePricesResult> - JSON object with prices for each token
    */
-  
   private async quotePricesForAllNodes(
     nodes: CirclesNode[]
-  ) {
-    const priceResults = [];
+  ): Promise<QuotePricesResult> {
+    const priceResults: PriceResult[] = [];
     
     console.log(`Starting price quotation for ${nodes.length} nodes...`);
     
@@ -652,7 +623,7 @@ export class DataInterface {
         const price = await this.getOracleSpotPrice(node.erc20tokenAddress, node.pools?.[0] || "");
         
         // Find existing entry for this token address or create new one
-        let existingResult = priceResults.find(
+        let existingResult: PriceResult | undefined = priceResults.find(
           result => result.erc20TokensAddress === node.erc20tokenAddress
         );
         
@@ -828,16 +799,6 @@ export class DataInterface {
     }
   }
 
-
-  /**
-   * @notice Retrieves the bot's ERC20 token balance.
-   * @param tokenAddress The address of the ERC20 token.
-   * @return {Promise<bigint>} A promise that resolves to the token balance as a bigint.
-   */
-  public async getTradingTokenBalance(): Promise<bigint> {
-    return await this.getERC20Balance(this.tradingToken.address as Address, wallet.address as Address);
-  }
-
   public async getERC20Balance(tokenAddress: Address, holder: Address): Promise<bigint> {
     // Create a contract instance for the token
     const tokenContract = new Contract(tokenAddress, erc20Abi, provider);
@@ -846,6 +807,7 @@ export class DataInterface {
     let balance = await tokenContract.balanceOf(holder);
     return balance;
   }
+
   public async getTradeCalculation(
     token1: Address,
     pool1: string,
@@ -1006,7 +968,7 @@ export class DataInterface {
   public async getPathfinderTransferData(
     from: CirclesNode,
     to: CirclesNode,
-    amount: bigint = MAX_ARBITRAGE_CRC_AMOUNT, // @todo move to const
+    amount: bigint = MAX_ARBITRAGE_CRC_AMOUNT,
     onlyMaxFlow: boolean = false
   ) {
     try {
@@ -1146,12 +1108,11 @@ export class DataInterface {
 
   /**
    * Get all pools on Gnosis chain in batches
-   * @returns {Promise<Object[]>} Promise resolving to array of all pool objects
    */
   // @todo update function to filter out tokens if there is no path set for such contracts
-  public async getAllGnosisPools() {
+  public async getAllGnosisPools(): Promise<BalancerPool[]> {
     const BATCH_SIZE = 1000;
-    const allPools = [];
+    const allPools: BalancerPool[] = [];
     
     try {
       // First, get the total count of pools
@@ -1187,9 +1148,8 @@ export class DataInterface {
 
   /**
    * Get the total count of pools on Gnosis chain
-   * @returns {Promise<number>} Promise resolving to total pool count
    */
-  private async getGnosisPoolsCount() {
+  private async getGnosisPoolsCount(): Promise<number> {
     const query = `
       query GetGnosisPoolsCount {
         poolGetPoolsCount(
@@ -1230,11 +1190,10 @@ export class DataInterface {
 
   /**
    * Get a batch of pools from Gnosis chain
-   * @param {number} first - Number of pools to fetch
-   * @param {number} skip - Number of pools to skip
-   * @returns {Promise<Object[]>} Promise resolving to array of pool objects
+   * @param first - Number of pools to fetch
+   * @param skip - Number of pools to skip
    */
-  private async getGnosisPoolsBatch(first: number, skip: number) {
+  private async getGnosisPoolsBatch(first: number, skip: number): Promise<BalancerPool[]> {
     const query = `
       query GetGnosisPools($first: Int!, $skip: Int!) {
         poolGetPools(
