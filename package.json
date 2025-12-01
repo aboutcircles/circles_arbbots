@@ -7,7 +7,9 @@
     "build": "tsc",
     "start": "pm2 start ecosystem.config.cjs",
     "start:nodaemon": "pm2 start ecosystem.config.cjs --no-daemon",
-    "start:monitor": "pm2 start ecosystem.monitor.config.cjs"
+    "start:monitor": "pm2 start ecosystem.monitor.config.cjs",
+    "start:api": "pm2 start ecosystem.api.config.cjs --no-daemon",
+    "dev:api": "tsx src/api-server.ts"
   },
   "keywords": [],
   "author": "",
@@ -16,19 +18,20 @@
   "description": "",
   "dependencies": {
     "@balancer/sdk": "^4.2.0",
-    "@circles-sdk/adapter-ethers": "^0.26.1",
-    "@circles-sdk/adapter-safe": "^0.26.1",
-    "@circles-sdk/data": "^0.29.0",
-    "@circles-sdk/pathfinder": "^0.29.0",
-    "@circles-sdk/profiles": "^0.29.0",
-    "@circles-sdk/sdk": "^0.29.0",
-    "@circles-sdk/utils": "^0.29.0",
+    "@aboutcircles/sdk-abis": "0.1.5",
+    "@aboutcircles/sdk-core": "0.1.5",
+    "@aboutcircles/sdk-pathfinder": "0.1.5",
+    "@aboutcircles/sdk-rpc": "0.1.5",
+    "@aboutcircles/sdk-runner": "0.1.5",
+    "@aboutcircles/sdk-types": "0.1.5",
+    "@aboutcircles/sdk-utils": "0.1.5",
     "dotenv": "^16.4.7",
-    "ethers": "^6.13.5",
     "express": "^5.1.0",
     "graphology": "^0.26.0",
+    "multihashes": "^4.0.3",
     "pg": "^8.13.1",
     "pm2": "^6.0.5",
+    "viem": "^2.38.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -38,6 +41,10 @@
     "@types/ws": "^8.5.13",
     "nodemon": "^3.1.9",
     "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
     "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "viem": "^2.38.0"
   }
 }

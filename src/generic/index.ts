@@ -1,5 +1,5 @@
 import { DirectedGraph } from "graphology";
-import { CirclesConverter, cidV0ToUint8Array } from "@circles-sdk/utils";
+import { CirclesConverter } from "@aboutcircles/sdk-utils";
 import { DataInterface } from "./dataInterface.js";
 import {
   CirclesNode,
@@ -30,6 +30,7 @@ class ArbitrageBot {
   private graph: DirectedGraph;
   private explorationRate: number;
   private dataInterface: DataInterface;
+  private nodes: CirclesNode[] = []; // Store nodes for periodic price logging
   // Failed edge props
   private failedEdges: Map<string, number> = new Map(); // edgeKey -> timestamp when it failed
   private readonly COOLDOWN_PERIOD = 30 * 60 * 1000; // 5 minutes in milliseconds
@@ -118,10 +119,17 @@ class ArbitrageBot {
       this.graph.addNode(node.avatar, node);
     }
 
-    // 8. Fetch latest liquidity estimates from database
+    // 8. Fetch latest liquidity estimates from database (only if logging is enabled)
     console.log("Fetching historical liquidity estimates...");
     const latestLiquidityEstimates =
       await this.dataInterface.fetchLatestLiquidityEstimates();
+
+    const hasObservations = latestLiquidityEstimates.size > 0;
+    if (hasObservations) {
+      console.log(`Found ${latestLiquidityEstimates.size} historical liquidity observations`);
+    } else {
+      console.log("No historical liquidity observations found - skipping missing edge liquidity calculation");
+    }
 
     // 9. Create complete graph with initial liquidity from historical data or zero
     console.log(`Creating edges between ${nodes.length} nodes...`);
@@ -144,8 +152,9 @@ class ArbitrageBot {
       }
     }
 
-    // 10. Calculate and update liquidity only for edges without historical data
-    console.log("Calculating missing edge liquidity...");
+    // 10. Calculate and update liquidity only for edges without historical data (skip if no observations exist)
+    if (hasObservations) {
+      console.log("Calculating missing edge liquidity...");
     for (const sourceNode of nodes) {
       for (const targetNode of nodes) {
         if (sourceNode === targetNode) continue;
@@ -203,9 +212,15 @@ class ArbitrageBot {
         }
       }
     }
+    } else {
+      console.log("Skipping liquidity calculation - no historical observations available");
+    }
 
     console.log("Graph initialization complete");
     console.timeEnd("Graph initialization");
+
+    // Store nodes for periodic price logging
+    this.nodes = nodes;
 
     // Log graph statistics
     console.log("\nGraph Statistics:");
@@ -340,17 +355,17 @@ class ArbitrageBot {
   public getCooldownStats(): { totalFailed: number, currentlyCooling: number } {
     const currentTime = Date.now();
     let currentlyCooling = 0;
-    
+
     for (const [edgeKey, failureTime] of this.failedEdges.entries()) {
       const failureCount = this.edgeFailureCount.get(edgeKey) || 0;
       const cooldownMultiplier = Math.min(failureCount, 5);
       const effectiveCooldown = this.COOLDOWN_PERIOD * cooldownMultiplier;
-      
+
       if ((currentTime - failureTime) <= effectiveCooldown) {
         currentlyCooling++;
       }
     }
-    
+
     return {
       totalFailed: this.failedEdges.size,
       currentlyCooling: currentlyCooling
@@ -390,30 +405,32 @@ class ArbitrageBot {
       const updatedEdgeInfo = await this.updateValues(edgeKey);
       // Simple price check - source should be higher than target for profitable arbitrage
       if (!updatedEdgeInfo.source.price || !updatedEdgeInfo.target.price) {
-        console.log("Missing price data for nodes");
+        // Missing price data for nodes
         this.markEdgeAsFailed(edgeKey);
         return;
-      }      
+      }
       //@todo inspect why such trades are not executed
-      if (updatedEdgeInfo.source.price * 13n / 10n > updatedEdgeInfo.target.price) {
+      if (updatedEdgeInfo.source.price * 15n / 10n > updatedEdgeInfo.target.price) {
         console.log(`Price check failed: source ${updatedEdgeInfo.source.price}, target ${updatedEdgeInfo.target.price}`);
         this.markEdgeAsFailed(edgeKey);
         return;
       }
 
       console.log("Price check passed, proceeding to execution...");
-      
+
       // Execute arbitrage with dynamic optimization
       const executionSuccess = await this.executeArbitrage(
-        updatedEdgeInfo.source, 
-        updatedEdgeInfo.target
+        updatedEdgeInfo.source,
+        updatedEdgeInfo.target,
+        edgeKey
       );
-      
+
       if (executionSuccess) {
         console.log("Trade executed successfully");
         this.markEdgeAsSuccessful(edgeKey);
       } else {
         console.log("Trade execution failed");
+        // Liquidity logging already handled in executeArbitrage
         this.markEdgeAsFailed(edgeKey);
       }
     } catch (error) {
@@ -483,34 +500,80 @@ class ArbitrageBot {
   }
 
   private async estimatePrices(nodes: CirclesNode[]): Promise<CirclesNode[]> {
-    // create a reference price for nodes whose price haven't been logged
+    console.log(`Fetching oracle prices for ${nodes.length} nodes...`);
+
+    // Get the next snapshot ID
+    const snapshotId = await this.dataInterface.getNextSnapshotId();
+    console.log(`Creating price snapshot with ID: ${snapshotId}`);
+
+    // Get reference price from oracle for fallback
     const referenceToken = await this.dataInterface.getERC20Token(
       DEFAULT_PRICE_REF_ADDRESS,
     );
-    const referencePrice = (await this.dataInterface.getSpotPrice(
-      referenceToken! as Address,
-    ))!.inputAmount.amount;
-    // @todo possibly it makes more sense just to check the price onchain
-    const latestPrices = await this.dataInterface.fetchLatestPrices(
-      nodes.map((node) => node.erc20tokenAddress),
-    );
 
+    let referencePrice: bigint;
+    try {
+      // Find the reference node with pool info to get its oracle price
+      const refNode = nodes.find(n => n.erc20tokenAddress === referenceToken);
+      if (refNode && refNode.pools && refNode.pools.length > 0) {
+        referencePrice = await this.dataInterface.getOracleSpotPrice(
+          referenceToken! as Address,
+          refNode.pools[0]
+        );
+      } else {
+        // Default fallback price if reference token not found
+        referencePrice = BigInt(1e18);
+      }
+    } catch (error) {
+      console.error("Error fetching reference price, using default:", error);
+      referencePrice = BigInt(1e18);
+    }
+
+    const swapAmount = BigInt(1e18); // 1 token with 18 decimals
+    const poolType = "balancer_v2";
+
+    // Fetch oracle prices for all nodes
     for (const node of nodes) {
-      const latestPrice = latestPrices.get(node.erc20tokenAddress);
-      if (!latestPrice) {
-        // to avoid zero scores, we actually vary the prices around the reference price randomly using a normal distribution
-        // random multiplier and divisor are numbers between 1000 and 1100.
-        const randomMultiplier =
-          1000n + BigInt(Math.floor(Math.random() * 100));
+      if (!node.pools || node.pools.length === 0) {
+        // No pool information - use random variation around reference price
+        const randomMultiplier = 1000n + BigInt(Math.floor(Math.random() * 100));
         const randomDivisor = 1000n + BigInt(Math.floor(Math.random() * 100));
-        // the resultign price varies plusminus 10% from the reference price
         node.price = (referencePrice * randomMultiplier) / randomDivisor;
         node.lastUpdated = Date.now();
-      } else {
-        node.price = latestPrice.price;
-        node.lastUpdated = latestPrice.timestamp;
+        continue;
+      }
+
+      try {
+        // Fetch oracle price for this node
+        node.price = await this.dataInterface.getOracleSpotPrice(
+          node.erc20tokenAddress,
+          node.pools[0]
+        );
+        node.lastUpdated = Date.now();
+
+        // Insert price snapshot to database
+        
+        await this.dataInterface.insertPriceSnapshot(
+          snapshotId,
+          node.erc20tokenAddress,
+          node.pools[0],
+          poolType,
+          node.price,
+          DEFAULT_PRICE_REF_ADDRESS,
+          swapAmount
+        );
+
+      } catch (error) {
+        console.error(`Error fetching oracle price for ${node.erc20tokenAddress}:`, error);
+        // Fallback to random variation around reference price
+        const randomMultiplier = 1000n + BigInt(Math.floor(Math.random() * 100));
+        const randomDivisor = 1000n + BigInt(Math.floor(Math.random() * 100));
+        node.price = (referencePrice * randomMultiplier) / randomDivisor;
+        node.lastUpdated = Date.now();
       }
     }
+
+    console.log(`Price estimation complete for ${nodes.length} nodes (snapshot ID: ${snapshotId})`);
     return nodes;
   }
 
@@ -528,17 +591,43 @@ class ArbitrageBot {
 
   async executeArbitrage(
     source: CirclesNode,
-    target: CirclesNode
+    target: CirclesNode,
+    edgeKey?: string
   ): Promise<boolean> {
+    let actualLiquidity: bigint | null = null;
+    const startTime = Date.now();
+
     try {
       // Step 2: Get actual liquidity after trust setup
       console.log("Getting current liquidity...");
-      const actualLiquidity = await this.dataInterface.getPathfinderTransferData(
+      const liquidityResult = await this.dataInterface.getPathfinderTransferData(
         source,
         target,
         CirclesConverter.attoStaticCirclesToAttoCircles(MAX_ARBITRAGE_CRC_AMOUNT),
         true
       );
+      actualLiquidity = typeof liquidityResult === 'bigint' ? liquidityResult : null;
+      const executionTime = Date.now() - startTime;
+
+      // Calculate edge score (price ratio)
+      const edgeScore = source.price && target.price
+        ? (source.price * BigInt(1e18)) / target.price
+        : undefined;
+
+      // Log liquidity observation
+      await this.dataInterface.logLiquidityObservation({
+        source_avatar: source.avatar,
+        target_avatar: target.avatar,
+        measured_liquidity: actualLiquidity || 0n,
+        required_amount: QUERY_REFERENCE_AMOUNT,
+        edge_id: edgeKey,
+        edge_score: edgeScore,
+        success: !!(actualLiquidity && actualLiquidity >= QUERY_REFERENCE_AMOUNT),
+        source_token_price: source.price,
+        target_token_price: target.price,
+        ref_token: DEFAULT_PRICE_REF_ADDRESS
+      });
+
       // @todo implement the update of the liquidity edge
       /*this.graph.updateEdgeAttributes(edgeKey, (attr) => {
         return {
@@ -562,7 +651,7 @@ class ArbitrageBot {
       // Start with doubling until we hit liquidity limit or find unprofitable trade
       while (currentAmount > QUERY_REFERENCE_AMOUNT) {
         console.log(`Testing amount: ${currentAmount.toString()}`);
-        
+
         try {
           const [isProfitable, profitInWstETH, wstETHNeeded] = await this.dataInterface.getTradeCalculation(
             source.erc20tokenAddress,
@@ -576,7 +665,7 @@ class ArbitrageBot {
             bestAmount = currentAmount;
             bestWstETHNeeded = wstETHNeeded;
             console.log(`Profitable trade found: amount=${currentAmount.toString()}, profit=${profitInWstETH.toString()}, wstETH needed=${wstETHNeeded.toString()}`);
-            
+
             break;
           } else {
             console.log(`Trade not profitable at amount: ${currentAmount.toString()}`);
@@ -585,14 +674,13 @@ class ArbitrageBot {
         } catch {
           console.log(`Unable to get the trade calculation, amount=${currentAmount.toString()}`);
           currentAmount = currentAmount / BigInt(2);
-          //124 999 999 978 759 738 394
         }
       }
 
       // Step 4: Execute the best trade found
       if (bestAmount > BigInt(0) && bestWstETHNeeded > BigInt(0)) {
         console.log(`Executing optimal trade: amount=${bestAmount.toString()}, wstETH=${bestWstETHNeeded.toString()}`);
-        
+
         const result = await this.dataInterface.executeWithV2(
           source,
           target,
@@ -600,7 +688,12 @@ class ArbitrageBot {
           bestAmount
         );
 
-        return result !== undefined && result !== null;
+        if (result === undefined || result === null) {
+          // Transaction execution failed
+          return false;
+        }
+
+        return true;
       } else {
         console.log("No profitable trade found after optimization");
         return false;
@@ -619,6 +712,7 @@ class ArbitrageBot {
     console.log("Resyncing graph...");
     this.graph = new DirectedGraph();
     await this.initializeGraph();
+
     console.log("Graph resync complete");
   }
 
@@ -626,6 +720,7 @@ class ArbitrageBot {
     let lastResync = Date.now();
 
     await this.initializeGraph();
+
 
     while (true) {
       const currentTime = Date.now();
