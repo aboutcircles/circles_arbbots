@@ -7,9 +7,7 @@
     "build": "tsc",
     "start": "pm2 start ecosystem.config.cjs",
     "start:nodaemon": "pm2 start ecosystem.config.cjs --no-daemon",
-    "start:monitor": "pm2 start ecosystem.monitor.config.cjs",
-    "start:api": "pm2 start ecosystem.api.config.cjs --no-daemon",
-    "dev:api": "tsx src/api-server.ts"
+    "start:monitor": "pm2 start ecosystem.monitor.config.cjs"
   },
   "keywords": [],
   "author": "",

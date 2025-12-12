@@ -3,14 +3,19 @@ import { Swap, Token } from "@balancer/sdk";
 // @todo: Make these 0xstrings.
 export type Address = `0x${string}`;
 
+export interface PoolInfo {
+  poolId: string; // For V2: bytes32 poolId, For V3: pool address
+  isV3: boolean;
+  intermediateToken: Address; // The non-CRC token in the pool (WETH, sDAI, WBTC, GNO, wstETH)
+}
+
 export interface CirclesNode {
   avatar: Address;
   erc20tokenAddress: Address;
   // tokenId: string;
   lastUpdated: number;
   isGroup: boolean;
-  mintHandler?: Address;
-  pools?: string[]; // BalancerV2 pools
+  pools?: PoolInfo[]; // Balancer V2 and V3 pools
   price?: bigint;
 }
 
@@ -64,19 +69,7 @@ export interface TrustRelationRow {
 
 export interface BaseGroupRow {
   address: Address;
-  mintHandler: Address;
   erc20tokenAddress: Address;
-}
-
-export interface LatestPriceRow {
-  price: bigint;
-  timestamp: number;
-}
-
-export interface SwapExecutionOptions {
-  slippage: number;
-  maxRetries?: number;
-  retryDelay?: number;
 }
 
 export interface TradeExecutionResult {
@@ -89,8 +82,6 @@ export interface TradeExecutionResult {
 export interface DataInterfaceParams {
   quoteReferenceAmount: bigint;
   logActivity: boolean;
-  quotingToken: Address;
-  collateralTokenDecimals: number;
 }
 
 export interface PoolToken {
@@ -113,6 +104,7 @@ export interface BalancerPool {
   name: string;
   symbol: string;
   type: string;
+  protocolVersion: number; // 2 or 3
   dynamicData: PoolDynamicData;
   poolTokens: PoolToken[];
 }

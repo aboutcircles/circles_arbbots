@@ -1,23 +1,17 @@
 import pg from "pg";
-const { Client } = pg;
-import WebSocket from "ws";
-
-if (!global.WebSocket) {
-  (global as any).WebSocket = WebSocket;
-}
 
 // Import viem
-import { createPublicClient, http, type Hex, bytesToHex } from "viem";
+import { createPublicClient, http, type Hex, bytesToHex, encodeAbiParameters, parseAbiParameters } from "viem";
 import { gnosis } from "viem/chains";
+
+import {
+  getV2PathToSDAI,
+  getV3PathToSDAI,
+} from './helpers/poolConfig.js';
 
 // Import Balancer SDK
 import {
-  BalancerApi,
-  ChainId,
-  SwapKind,
   Token,
-  TokenAmount,
-  Swap,
 } from "@balancer/sdk";
 
 // Import new Circles SDK
@@ -26,42 +20,37 @@ import { CirclesConverter } from '@aboutcircles/sdk-utils';
 import { CirclesRpc } from '@aboutcircles/sdk-rpc';
 import { createFlowMatrix } from '@aboutcircles/sdk-pathfinder';
 import type { Address } from '@aboutcircles/sdk-types';
-import { PrivateKeyContractRunner } from './helpers/runner';
+import { PrivateKeyContractRunner } from './helpers/runner.js';
 
 
 import {
   BalanceRow,
   BaseGroupRow,
   CirclesNode,
-  Direction,
-  FetchBalancerQuoteParams,
-  LatestPriceRow,
   TrustRelationRow,
   DataInterfaceParams,
   BalancerPool,
-  PriceResult,
-  QuotePricesResult
-} from "./interfaces";
+  PoolInfo
+} from "./interfaces/index.js";
 // Import contract wrappers
 import {
   ArbbotOracleContract,
   ArbbotV2Contract,
-  BaseGroupContract,
-  ERC20LiftContract,
   ERC20Contract,
-  InflationaryTokenContract,
+  ERC20LiftContract,
   BaseGroupMintRouterContract,
-} from './helpers/contracts';
+} from './helpers/contracts.js';
 
+import { wstETH } from './helpers/poolConfig.js';
+ 
 import {
   DemurragedVSInflation,
   erc20LiftAddress,
   arbbotOracleAddress,
   arbbotV2Address,
   baseGroupMintRouterAddress,
-  BALANCER_VAULT,
-  MAX_ARBITRAGE_CRC_AMOUNT,
-  PROFIT_THRESHOLD,
+  BALANCER_VAULT_V2,
+  BALANCER_VAULT_V3,
   supportedTokens,
   BALANCER_API_URL,
   getNextSnapshotIdQuery,
@@ -70,15 +59,14 @@ import {
   getBalancesQuery,
   getTrustRelationsQuery,
   getCurrentBackersQuery,
-  getBaseGroupsQuery,
   fetchLatestLiquidityEstimatesQuery,
   getGnosisPoolsCountQuery,
   getGnosisPoolsBatchQuery
-} from "./helpers/constants";
+} from "./helpers/constants.js";
 
 // Global config
 const rpcUrl = process.env.RPC_URL!;
-const chainId = ChainId.GNOSIS_CHAIN;
+const chainId = 100;
 const botPrivateKey = process.env.PRIVATE_KEY! as Hex;
 
 /**
@@ -93,7 +81,6 @@ export class DataInterface {
   private client: pg.Client;
   private loggerClient: pg.Client;
   public quoteReferenceAmount: bigint;
-  public quotingToken: Token;
   public logActivity: boolean;
   public runner?: PrivateKeyContractRunner;
   public core?: Core;
@@ -102,9 +89,6 @@ export class DataInterface {
   public arbbotV2?: ArbbotV2Contract;
   public liftERC20?: ERC20LiftContract;
   public baseGroupMintRouter?: BaseGroupMintRouterContract;
-  private tradingToQuoteRate: bigint | null = null;
-  private lastRateUpdate: number = 0;
-  private readonly RATE_UPDATE_INTERVAL = 60000; // 1 minute
 
   constructor(params: DataInterfaceParams) {
     this.client = new pg.Client({
@@ -130,13 +114,6 @@ export class DataInterface {
     });
 
     this.quoteReferenceAmount = params.quoteReferenceAmount;
-
-    this.quotingToken = new Token(
-      chainId,
-      params.quotingToken,
-      Number(params.collateralTokenDecimals),
-      "Quote Token",
-    );
 
     this.logActivity = params.logActivity;
   }
@@ -385,18 +362,21 @@ export class DataInterface {
 
   private async getBaseGroups(): Promise<BaseGroupRow[]> {
     try {
-      const result = await this.client.query(getBaseGroupsQuery);
-      return result.rows.map((row) => ({
-        address: row.group,
-        mintHandler: row.mintHandler,
-        erc20tokenAddress: row.erc20WrapperStatic
-      }));
+      const allGroups = await this.rpc?.group.findGroups(200);
+      if(!allGroups) return [] as BaseGroupRow[];
+      return allGroups
+        .filter((row) => row.erc20WrapperStatic && row.erc20WrapperStatic !== '0x0')
+        .map((row): BaseGroupRow => ({
+          address: row.group,
+          erc20tokenAddress: row.erc20WrapperStatic || '0x0'
+        }));
     } catch (error) {
       console.error("Error fetching base groups:", error);
       return [];
     }
   }
-  // Update nodes with Balancer V2 pool ids
+  // Update nodes with Balancer V2 and V3 pool ids
+  // @todo review how optimal is it
   private updateNodesWithPoolIds(nodes: CirclesNode[], pools: BalancerPool[]): CirclesNode[] {
     if (!nodes || !Array.isArray(nodes)) {
       console.warn('Invalid nodes array provided');
@@ -408,17 +388,19 @@ export class DataInterface {
       return nodes;
     }
 
-    console.log(`Updating ${nodes.length} nodes with pool IDs from ${pools.length} available pools`);
+    console.log(`Updating ${nodes.length} nodes with pool IDs from ${pools.length} available pools (V2 and V3)`);
 
     const supportedTokensLower = supportedTokens.map(token => token.toLowerCase());
-    const tokenToPoolIdsMap = new Map();
+    const tokenToPoolInfoMap = new Map<string, PoolInfo[]>();
 
     pools.forEach(pool => {
       if (pool.poolTokens && Array.isArray(pool.poolTokens)) {
+        // Skip multi-token pools (more than 2 tokens)
         if (pool.poolTokens.length > 2) {
           return;
         }
 
+        // Check if pool contains at least one supported token
         const hasSupprotedToken = pool.poolTokens.some((token: any) =>
           supportedTokensLower.includes(token.address.toLowerCase())
         );
@@ -427,19 +409,33 @@ export class DataInterface {
           return;
         }
 
+        const isV3 = pool.protocolVersion === 3;
+
+        // For each token in the pool, create a PoolInfo entry
         pool.poolTokens.forEach((token: any) => {
           const tokenAddress = token.address.toLowerCase();
 
-          if (!tokenToPoolIdsMap.has(tokenAddress)) {
-            tokenToPoolIdsMap.set(tokenAddress, []);
+          // Find the other token (intermediate token)
+          const otherToken = pool.poolTokens.find((t: any) =>
+            t.address.toLowerCase() !== tokenAddress
+          );
+          // @todo update
+          const poolInfo: PoolInfo = {
+            poolId: isV3 ? pool.address : pool.id, // V3 uses address, V2 uses id
+            isV3: isV3,
+            intermediateToken: otherToken?.address.toLowerCase() as Address || '0x0000000000000000000000000000000000000000'
+          };
+
+          if (!tokenToPoolInfoMap.has(tokenAddress)) {
+            tokenToPoolInfoMap.set(tokenAddress, []);
           }
 
-          tokenToPoolIdsMap.get(tokenAddress).push(pool.id);
+          tokenToPoolInfoMap.get(tokenAddress)!.push(poolInfo);
         });
       }
     });
 
-    console.log(`Created token-to-pool-IDs mapping for ${tokenToPoolIdsMap.size} unique tokens`);
+    console.log(`Created token-to-pool mapping for ${tokenToPoolInfoMap.size} unique tokens`);
 
     const updatedNodes = nodes.map(node => {
       if (!node.erc20tokenAddress) {
@@ -452,18 +448,20 @@ export class DataInterface {
       }
 
       const tokenAddress = node.erc20tokenAddress.toLowerCase();
-      const matchingPoolIds = tokenToPoolIdsMap.get(tokenAddress) || [];
+      const matchingPools = tokenToPoolInfoMap.get(tokenAddress) || [];
 
-      console.log(`Token ${node.erc20tokenAddress} found in ${matchingPoolIds.length} pools`);
+      const v2Count = matchingPools.filter(p => !p.isV3).length;
+      const v3Count = matchingPools.filter(p => p.isV3).length;
+      console.log(`Token ${node.erc20tokenAddress} found in ${matchingPools.length} pools (V2: ${v2Count}, V3: ${v3Count})`);
 
       return {
         ...node,
-        pools: matchingPoolIds
+        pools: matchingPools
       };
     });
 
-    const totalPoolsAssigned = updatedNodes.reduce((sum, node) => sum + node.pools.length, 0);
-    const nodesWithPools = updatedNodes.filter(node => node.pools.length > 0).length;
+    const totalPoolsAssigned = updatedNodes.reduce((sum, node) => sum + (node.pools?.length || 0), 0);
+    const nodesWithPools = updatedNodes.filter(node => (node.pools?.length || 0) > 0).length;
 
     console.log(`Summary: ${nodesWithPools}/${updatedNodes.length} nodes have pools assigned`);
     console.log(`Total pool assignments: ${totalPoolsAssigned}`);
@@ -476,13 +474,20 @@ export class DataInterface {
     if(process.env.ONLY_GROUPS !== "true") {
       const backerAddresses = await this.getCurrentBackers();
       for (const backerAddress of backerAddresses) {
+        // @todo possible we might enrich this with the avatars data
         const tokenAddress = await this.getERC20Token(backerAddress);
+
+        // Skip if we couldn't get a valid token address
+        if (!tokenAddress) {
+          console.warn(`Skipping backer ${backerAddress} - no valid ERC20 token`);
+          continue;
+        }
 
         const node: CirclesNode = {
           avatar: backerAddress as Address,
           isGroup: false,
           pools: [],
-          erc20tokenAddress: tokenAddress! as Address,
+          erc20tokenAddress: tokenAddress as Address,
           lastUpdated: Date.now(),
         };
         nodes.push(node);
@@ -491,14 +496,10 @@ export class DataInterface {
 
     const baseGroups = await this.getBaseGroups();
     for (const group of baseGroups) {
-      if (!group.mintHandler) {
-        const mintHandler = await this.getMintHandler(group.address);
-        if(!mintHandler) continue;
-        group.mintHandler = mintHandler;
-      };
-
-      const balancerVaultV2Balance = await this.getERC20Balance(group.erc20tokenAddress as Address, BALANCER_VAULT);
-      if (!balancerVaultV2Balance) {
+      const balancerVaultV2Balance = await this.getERC20Balance(group.erc20tokenAddress as Address, BALANCER_VAULT_V2);
+      const balancerVaultV3Balance = await this.getERC20Balance(group.erc20tokenAddress as Address, BALANCER_VAULT_V3);
+      // Skip groups with no balance in either vault, this means their tokens are not traded on Balancer
+      if (!balancerVaultV2Balance && !balancerVaultV3Balance) {
         continue;
       }
 
@@ -507,7 +508,6 @@ export class DataInterface {
         isGroup: true,
         pools: [],
         erc20tokenAddress: group.erc20tokenAddress as Address,
-        mintHandler: group.mintHandler,
         lastUpdated: Date.now(),
       };
       nodes.push(node);
@@ -544,45 +544,19 @@ export class DataInterface {
     }
   }
 
-  /**
-   * @deprecated This method is no longer used. Prices are now fetched from oracle on-demand.
-   */
-  public async fetchLatestPrices(
-    tokenAddresses: string[],
-  ): Promise<Map<string, LatestPriceRow | null>> {
-    console.warn("fetchLatestPrices is deprecated. Use getOracleSpotPrice instead.");
-    const priceMap = new Map<string, LatestPriceRow | null>();
-    tokenAddresses.forEach((address) => {
-      priceMap.set(address, null);
-    });
-    return priceMap;
-  }
-
   public async getERC20Token(avatarAddress: string): Promise<string | null> {
-    const tokenAddress = await this.liftERC20!.erc20Circles(
-      DemurragedVSInflation,
-      avatarAddress as Address,
-    );
-
-    if (tokenAddress === '0x0000000000000000000000000000000000000000') {
-      return null;
-    }
-    return tokenAddress.toLowerCase();
-  }
-
-  public async getMintHandler(group: Address): Promise<Address | null> {
-    const groupContract = new BaseGroupContract({
-      address: group,
-      rpcUrl,
-    });
-
     try {
-      const mintHandler = await groupContract.BASE_MINT_HANDLER();
-      if (mintHandler === '0x0000000000000000000000000000000000000000') {
+      const tokenAddress = await this.liftERC20!.erc20Circles(
+        DemurragedVSInflation,
+        avatarAddress as Address,
+      );
+
+      if (tokenAddress === '0x0000000000000000000000000000000000000000') {
         return null;
       }
-      return mintHandler.toLowerCase() as Address;
-    } catch {
+      return tokenAddress.toLowerCase();
+    } catch (error) {
+      console.warn(`Failed to get ERC20 token for avatar ${avatarAddress}:`, error instanceof Error ? error.message : error);
       return null;
     }
   }
@@ -597,44 +571,174 @@ export class DataInterface {
     return balance;
   }
 
+  /**
+   * Calculate arbitrage profitability using the new oracle
+   * @param token1 Buy token (CRC to buy)
+   * @param pool1Info Pool info for buying
+   * @param token2 Sell token (CRC to sell)
+   * @param pool2Info Pool info for selling
+   * @param amount Amount of CRC to trade
+   * @returns [isProfitable, profitInWstETH, wstETHNeeded]
+   */
   public async getTradeCalculation(
     token1: Address,
-    pool1: string,
+    pool1Info: PoolInfo,
     token2: Address,
-    pool2: string,
+    pool2Info: PoolInfo,
     amount: bigint
-  ) {
-    const executionData = await this.arbbotOracle!.checkCRCArbitrage(
-      token1,
-      pool1,
-      token2,
-      pool2,
-      amount
-    );
+  ): Promise<readonly [boolean, bigint, bigint]> {
 
-    return executionData;
+    try {
+      let wstETHNeeded: bigint;
+      let wstETHReceived: bigint;
+
+      // Build forward steps: wstETH -> token1 (buy)
+      if (pool1Info.isV3) {
+        const forwardStepsV3 = await this.arbbotOracle!.buildForwardSwapStepsV3(
+          token1,
+          pool1Info.poolId as Address
+        );
+        wstETHNeeded = await this.arbbotOracle!.getAmountInV3(
+          wstETH,
+          amount,
+          forwardStepsV3
+        );
+      } else {
+        const stepsForwardV2 = await this.arbbotOracle!.buildForwardSwapStepsV2(
+          token1,
+          pool1Info.poolId
+        );
+        wstETHNeeded = await this.arbbotOracle!.getAmountInV2(wstETH, amount, stepsForwardV2);
+      }
+
+      // Build backward steps: token2 -> wstETH (sell)
+      if (pool2Info.isV3) {
+        const backwardStepsV3 = await this.arbbotOracle!.buildBackwardSwapStepsV3(
+          token2,
+          pool2Info.poolId as Address
+        );
+
+        wstETHReceived = await this.arbbotOracle!.getAmountOutV3(
+          token2,
+          amount,
+          backwardStepsV3
+        );
+      } else {
+        const backwardStepsV2 = await this.arbbotOracle!.buildBackwardSwapStepsV2(
+          token2,
+          pool2Info.poolId
+        );
+        wstETHReceived = await this.arbbotOracle!.getAmountOutV2(
+          token2,
+          amount,
+          backwardStepsV2
+        );
+      } 
+
+      // Calculate profit
+      if(wstETHReceived === 0n || wstETHNeeded === 0n) {
+        throw new Error("Error: Unable to get the trade calculations from the oracle");
+      }
+    
+      const isProfitable = wstETHReceived > wstETHNeeded;
+      const profitInWstETH = isProfitable ? wstETHReceived - wstETHNeeded : 0n;
+
+      return [isProfitable, profitInWstETH, wstETHNeeded] as const;
+    } catch (error) {
+      return [false, 0n, 0n ] as const;
+    }
   }
 
-  public async getOracleSpotPrice(tokenAddress: Address, poolId: string): Promise<bigint> {
-    const amount = await this.arbbotOracle!.getSwapQuoteToDAI(
-      tokenAddress,
-      poolId,
-      BigInt(1e18)
-    );
-    return amount;
+  /**
+   * Get oracle spot price for a CRC token in sDAI terms
+   * Uses pre-defined paths matching BalancerOracle.sol's internal paths
+   * Optimized to make only one call per getAmountOut function
+   * @param tokenAddress CRC ERC20 token address
+   * @param poolInfo Pool information (id, version, and intermediate token)
+   * @returns Price in sDAI (amount of sDAI per 1e18 CRC)
+   */
+  public async getOracleSpotPrice(tokenAddress: Address, poolInfo: PoolInfo): Promise<bigint> {
+    // 0x5b10e15404c490892ebb6a2c7a22bb594c32e9e8 0xa2ce3ddfb4ca620d3c9a14fd30aac3851cd47ef5
+    try {
+      const referenceAmount = BigInt(1e18); // 1 token
+
+      // Get intermediate token from poolInfo
+      if (!poolInfo.intermediateToken) {
+        throw new Error("No info about the intermediate tokens");
+      }
+      const intermediateToken = poolInfo.intermediateToken;
+
+      let sdaiAmount: bigint;
+
+      if (poolInfo.isV3) {
+        // V3 flow: CRC -> intermediate (via V3 pool) -> sDAI (via V3 multi-hop path)
+        const v3PathToSDAI = getV3PathToSDAI(intermediateToken);
+
+        if (v3PathToSDAI === null) {
+          console.warn(`No V3 path found from ${intermediateToken} to sDAI`);
+          return 0n;
+        }
+
+        // Build combined V3 path: CRC -> intermediate -> ... -> sDAI
+        // This combines the CRC->intermediate hop with the static path to sDAI
+        const combinedV3Path = [
+          {
+            pool: poolInfo.poolId as Address,
+            tokenOut: intermediateToken,
+            isBuffer: false
+          },
+          ...v3PathToSDAI  // Empty array if intermediate is already sDAI
+        ];
+        // Convert intermediate to sDAI via V3
+        // Note: V3 queries must be called with from=0x0 (similar to vm.prank in Solidity tests)
+        sdaiAmount = await this.arbbotOracle!.getAmountOutV3(
+          tokenAddress,
+          referenceAmount,
+          combinedV3Path
+        ) as bigint;
+      } else {
+        // V2 flow: CRC -> intermediate -> ... -> sDAI
+        const v2PathToSDAI = getV2PathToSDAI(intermediateToken);
+
+        if (v2PathToSDAI === null) {
+          console.warn(`No V2 path found from ${intermediateToken} to sDAI`);
+          return 0n;
+        }
+
+        // Build combined V2 path: CRC -> intermediate -> ... -> sDAI
+        // This combines the CRC->intermediate hop with the constant path to sDAI
+        const combinedV2Path = [
+          {
+            poolId: poolInfo.poolId,
+            tokenOut: intermediateToken
+          },
+          ...v2PathToSDAI  // Empty array if intermediate is already sDAI
+        ];
+
+        // Single V2 call for entire path from CRC to sDAI
+        sdaiAmount = await this.arbbotOracle!.getAmountOutV2(
+          tokenAddress,
+          referenceAmount,
+          combinedV2Path
+        );
+      }
+
+      return sdaiAmount;
+    } catch (error) {
+      console.error(`Error fetching oracle price for ${tokenAddress} ${poolInfo.poolId} (V${poolInfo.isV3 ? '3' : '2'}):`, error);
+      return 0n;
+    }
   }
 
   public async getPathfinderTransferData(
     from: CirclesNode,
     to: CirclesNode,
-    amount: bigint = MAX_ARBITRAGE_CRC_AMOUNT,
+    amount: bigint,
     onlyMaxFlow: boolean = false
   ) {
     try {
-      const toAddress = to.isGroup
-        ? to.mintHandler!
-        : arbbotV2Address;
-      const toTokens = to.isGroup ? undefined : [to.avatar];
+      const toAddress = arbbotV2Address;
+      const toTokens = [to.avatar];
 
       // Prepare simulated balance for the arbbot middleware instance
       const simulatedBalances = [
@@ -648,12 +752,12 @@ export class DataInterface {
       ];
 
       // Prepare simulated trust if not a group (simulate that arbbot trusts the to.avatar)
-      const simulatedTrusts = !to.isGroup ? [
+      const simulatedTrusts = [
         {
           truster: arbbotV2Address as Address,
           trustee: to.avatar
         }
-      ] : undefined;
+      ];
 
       console.log(
         "pathfinder args",
@@ -674,7 +778,7 @@ export class DataInterface {
         toTokens: toTokens,
         simulatedBalances: simulatedBalances,
         simulatedTrusts: simulatedTrusts,
-        maxTransfers: 100,
+        maxTransfers: 70,
       });
 
       if(onlyMaxFlow) {
@@ -762,11 +866,16 @@ export class DataInterface {
     }
   }
 
-  async executeWithV2(
+  /**
+   * Execute arbitrage using new ArbbotV2 contract (with SwapConfig)
+   */
+  async executeArbitrageV2(
     buyNode: CirclesNode,
     sellNode: CirclesNode,
-    requiredEth: bigint,
-    crcAmount: bigint
+    flashLoanAmount: bigint,
+    crcAmount: bigint,
+    // @todo this address should be picked from const
+    collector: Address = "0x0Bb4C6414e0d566d0F5cbEa10Ca695Dd9A3FFb97" as Address
   ) {
     if (!this.runner) {
       throw new Error("Runner not initialized");
@@ -783,8 +892,9 @@ export class DataInterface {
       throw new Error("Failed to get pathfinder transfer data");
     }
 
-    console.log("execution data");
-    console.log(requiredEth, demurragedAmount);
+    console.log("Execution data");
+    console.log("Flash loan amount:", flashLoanAmount);
+    console.log("CRC amount (demurraged):", demurragedAmount);
     console.dir(pathFlow, {depth: null});
 
     // Convert Uint8Array to hex strings for viem compatibility
@@ -793,31 +903,180 @@ export class DataInterface {
       data: stream.data instanceof Uint8Array ? bytesToHex(stream.data) : stream.data
     }));
 
-    const txRequest = this.arbbotV2!.executeArbitrageWithFlashLoan(
-      buyNode.erc20tokenAddress,
-      buyNode.pools?.[0]!,
-      sellNode.erc20tokenAddress,
-      sellNode.pools?.[0]!,
-      demurragedAmount,
-      requiredEth * BigInt(101) / BigInt(100),
-      {
+    const wstETH = "0x6C76971f98945AE98dD7d4DFcA8711ebea946eA6" as Address;
+
+    // Build forward swap configs (wstETH -> sourceCRC)
+    const buyPool = buyNode.pools?.[0];
+    if (!buyPool) throw new Error("Buy node has no pools");
+
+    let forwardSwaps: { isV3: boolean; swapData: Hex }[];
+
+    if (buyPool.isV3) {
+      // Get V3 steps
+      const forwardSteps = await this.arbbotV2!.read('buildForwardSwapStepsV3', [
+        buyNode.erc20tokenAddress,
+        buyPool.poolId as Address
+      ]) as readonly [Address, Address, boolean][];
+
+      // Manually encode SwapPathExactAmountIn
+      const swapData = encodeAbiParameters(
+        parseAbiParameters('(address tokenIn, (address pool, address tokenOut, bool isBuffer)[] steps, uint256 exactAmountIn, uint256 minAmountOut)'),
+        [{
+          tokenIn: wstETH,
+          steps: forwardSteps.map((step: any) => ({
+            pool: step[0] || step.pool,
+            tokenOut: step[1] || step.tokenOut,
+            isBuffer: step[2] ?? step.isBuffer
+          })),
+          exactAmountIn: demurragedAmount,
+          minAmountOut: 0n
+        }]
+      );
+
+      forwardSwaps = [{ isV3: true, swapData }];
+    } else {
+      // Get V2 steps
+      const forwardSteps = await this.arbbotV2!.read('buildForwardSwapStepsV2', [
+        buyNode.erc20tokenAddress,
+        buyPool.poolId
+      ]) as readonly [string, Address][];
+
+      // Build assets array: [wstETH, ...intermediates, finalCRC]
+      const assets: Address[] = [wstETH];
+      for (const step of forwardSteps) {
+        const tokenOut = step[1] || (step as any).tokenOut;
+        assets.push(tokenOut);
+      }
+
+      // Build batch swap steps
+      const batchSteps = forwardSteps.map((step, i) => {
+        const poolId = step[0] || (step as any).poolId;
+        return {
+          poolId: poolId,
+          assetInIndex: BigInt(i),
+          assetOutIndex: BigInt(i + 1),
+          amount: i === 0 ? demurragedAmount : 0n,
+          userData: '0x' as Hex
+        };
+      });
+
+      // Build limits: [input, ...zeros, -1]
+      const limits: bigint[] = [demurragedAmount];
+      for (let i = 1; i < assets.length - 1; i++) {
+        limits.push(0n);
+      }
+      limits.push(-1n);
+
+      // Manually encode (BatchSwapStep[], address[], int256[])
+      const swapData = encodeAbiParameters(
+        parseAbiParameters('(bytes32 poolId, uint256 assetInIndex, uint256 assetOutIndex, uint256 amount, bytes userData)[], address[], int256[]'),
+        [batchSteps, assets, limits]
+      );
+
+      forwardSwaps = [{ isV3: false, swapData }];
+    }
+
+    // Build backward swap configs (targetCRC -> wstETH)
+    const sellPool = sellNode.pools?.[0];
+    if (!sellPool) throw new Error("Sell node has no pools");
+
+    let backwardSwaps: { isV3: boolean; swapData: Hex }[];
+
+    if (sellPool.isV3) {
+      // Get V3 steps
+      const backwardSteps = await this.arbbotV2!.read('buildBackwardSwapStepsV3', [
+        sellNode.erc20tokenAddress,
+        sellPool.poolId as Address
+      ]) as readonly [Address, Address, boolean][];
+
+      // Manually encode SwapPathExactAmountIn
+      const swapData = encodeAbiParameters(
+        parseAbiParameters('(address tokenIn, (address pool, address tokenOut, bool isBuffer)[] steps, uint256 exactAmountIn, uint256 minAmountOut)'),
+        [{
+          tokenIn: sellNode.erc20tokenAddress,
+          steps: backwardSteps.map((step: any) => ({
+            pool: step[0] || step.pool,
+            tokenOut: step[1] || step.tokenOut,
+            isBuffer: step[2] ?? step.isBuffer
+          })),
+          exactAmountIn: demurragedAmount,
+          minAmountOut: 0n
+        }]
+      );
+
+      backwardSwaps = [{ isV3: true, swapData }];
+    } else {
+      // Get V2 steps
+      const backwardSteps = await this.arbbotV2!.read('buildBackwardSwapStepsV2', [
+        sellNode.erc20tokenAddress,
+        sellPool.poolId
+      ]) as readonly [string, Address][];
+
+      // Build assets array: [sourceCRC, ...intermediates, wstETH]
+      const assets: Address[] = [sellNode.erc20tokenAddress];
+      for (const step of backwardSteps) {
+        const tokenOut = step[1] || (step as any).tokenOut;
+        assets.push(tokenOut);
+      }
+
+      // Build batch swap steps
+      const batchSteps = backwardSteps.map((step, i) => {
+        const poolId = step[0] || (step as any).poolId;
+        return {
+          poolId: poolId,
+          assetInIndex: BigInt(i),
+          assetOutIndex: BigInt(i + 1),
+          amount: i === 0 ? demurragedAmount : 0n,
+          userData: '0x' as Hex
+        };
+      });
+
+      // Build limits: [input, ...zeros, -1]
+      const limits: bigint[] = [demurragedAmount];
+      for (let i = 1; i < assets.length - 1; i++) {
+        limits.push(0n);
+      }
+      limits.push(-1n);
+
+      // Manually encode (BatchSwapStep[], address[], int256[])
+      const swapData = encodeAbiParameters(
+        parseAbiParameters('(bytes32 poolId, uint256 assetInIndex, uint256 assetOutIndex, uint256 amount, bytes userData)[], address[], int256[]'),
+        [batchSteps, assets, limits]
+      );
+
+      backwardSwaps = [{ isV3: false, swapData }];
+    }
+
+    const txRequest = this.arbbotV2!.executeArbitrage({
+      flashLoanToken: wstETH,
+      flashLoanAmount: flashLoanAmount * BigInt(101) / BigInt(100), // Add 1% buffer
+      unwrapFlashloanToken: false,
+      flashloanUnderlyingToken: "0x0000000000000000000000000000000000000000" as Address,
+      forwardSwaps: forwardSwaps,
+      sourceCRC: buyNode.erc20tokenAddress,
+      targetCRC: sellNode.erc20tokenAddress,
+      transitiveePath: {
         flowVertices: pathFlow.flowVertices as Address[],
         flow: pathFlow.flowEdges,
         streams: streams,
         packedCoordinates: pathFlow.packedCoordinates as Hex,
       },
-      "0x0Bb4C6414e0d566d0F5cbEa10Ca695Dd9A3FFb97" as Address
-    );
+      backwardSwaps: backwardSwaps,
+      wrapBackToFlashloan: false,
+      backwardOutputToken: wstETH,
+      collector: collector,
+    });
 
     const tx = await this.runner.sendTransaction({
       to: txRequest.to,
       data: txRequest.data,
     });
 
-    console.log(tx?.transactionHash);
+    console.log("Transaction hash:", tx?.transactionHash);
     return true;
   }
 
+  // @todo optimize the graphql calls
   /**
    * Get all pools on Gnosis chain in batches
    */

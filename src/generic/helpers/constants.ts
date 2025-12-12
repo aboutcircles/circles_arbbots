@@ -2,31 +2,27 @@ import { Address } from "../interfaces/index.js";
 
 // Constant addresses
 const erc20LiftAddress = "0x5F99a795dD2743C36D63511f0D4bc667e6d3cDB5";
-const arbbotOracleAddress = "0xd16Fd7cAfB58EFd5df2a34d6BD96B0e9703efF49";
-const arbbotV2Address = "0x767eB36A98a89EB7DE6AD4d0A1049584cB54885e";
+const arbbotOracleAddress = "0xc706389fc1cfebf04e9c26bc004d746020fc91e7"; // New BalancerOracle with V2/V3 support
+const arbbotV2Address = "0xa28c43F92F6498AFAE4266B29a668624bA031913";
 const baseGroupMintRouterAddress = "0xDC287474114cC0551a81DdC2EB51783fBF34802F";
 const PROFIT_THRESHOLD = BigInt(1e12); // profit threshold, should be denominated in the collateral currency
 
 const DemurragedVSInflation = 1;
 
 // global variables
-const LOG_ACTIVITY = true;
+const LOG_ACTIVITY = false;
 // @todo make this amount adjustable
-const QUERY_REFERENCE_AMOUNT = BigInt(1e18);
-const EXPLORATION_RATE = 0.1;
-const MIN_BUYING_AMOUNT = QUERY_REFERENCE_AMOUNT;
+const QUERY_REFERENCE_AMOUNT = BigInt(5e17);
 const RESYNC_INTERVAL = 1000 * 60 * 60; // Resync every 60 minutes
-const DEFAULT_PRICE_REF_ADDRESS =
-  "0x86533d1aDA8Ffbe7b6F7244F9A1b707f7f3e239b".toLowerCase() as Address; // METRI TEST SUPERGROUP
-const QUOTE_TOKEN =
-  "0xe91d153e0b41518a2ce8dd3d7944fa863463a97d".toLowerCase() as Address; // xDAI
-const BALANCER_VAULT =
+const BALANCER_VAULT_V2 =
   "0xBA12222222228d8Ba445958a75a0704d566BF2C8".toLowerCase() as Address; // Balancer Vault V2
-const QUOTE_TOKEN_DEMICALS = 18;
+const BALANCER_VAULT_V3 =
+  "0xbA1333333333a1BA1108E8412f11850A5C319bA9".toLowerCase() as Address; // Balancer Vault V3
 const NODE_LIMIT = 1000; // Increased from 5 to allow more nodes
 const BALANCER_API_URL = "https://api-v3.balancer.fi/";
 const MAX_ARBITRAGE_CRC_AMOUNT = BigInt(1e21);
 
+// @todo update the list of supported tokens for v2 and v3 accordingly
 // Supported pair tokens in the pools with circles tokens
 const supportedTokens: Address[] = [
   "0xaf204776c7245bF4147c2612BF6e5972Ee483701", // sDAI
@@ -94,16 +90,6 @@ const getCurrentBackersQuery = `
   FROM "CrcV2_CirclesBackingCompleted"
 `;
 
-const getBaseGroupsQuery = `
-  SELECT
-    "group",
-    "mintHandler",
-    "erc20WrapperStatic"
-  FROM "V_CrcV2_Groups" where "erc20WrapperStatic" is not null and
-    "V_CrcV2_Groups"."mintPolicy"='0xcdfc5135aec0afbf102c108e7f5c8a88c6112842' and
-    "V_CrcV2_Groups"."memberCount" > 0
-`;
-
 const fetchLatestLiquidityEstimatesQuery = `
   WITH LatestObservations AS (
     SELECT
@@ -131,7 +117,7 @@ const getGnosisPoolsCountQuery = `
     poolGetPoolsCount(
       where: {
         chainIn: [GNOSIS]
-        protocolVersionIn: [2]
+        protocolVersionIn: [2, 3]
       }
     )
   }
@@ -142,7 +128,7 @@ const getGnosisPoolsBatchQuery = `
     poolGetPools(
       where: {
         chainIn: [GNOSIS]
-        protocolVersionIn: [2]
+        protocolVersionIn: [2, 3]
       }
       first: $first
       skip: $skip
@@ -154,6 +140,7 @@ const getGnosisPoolsBatchQuery = `
       name
       symbol
       type
+      protocolVersion
       dynamicData {
         totalLiquidity
         volume24h
@@ -190,17 +177,13 @@ export {
     arbbotOracleAddress,
     arbbotV2Address,
     baseGroupMintRouterAddress,
-    BALANCER_VAULT,
-    DEFAULT_PRICE_REF_ADDRESS,
-    EXPLORATION_RATE,
+    BALANCER_VAULT_V2,
+    BALANCER_VAULT_V3,
     LOG_ACTIVITY,
-    MIN_BUYING_AMOUNT,
     NODE_LIMIT,
     PROFIT_THRESHOLD,
     MAX_ARBITRAGE_CRC_AMOUNT,
     QUERY_REFERENCE_AMOUNT,
-    QUOTE_TOKEN,
-    QUOTE_TOKEN_DEMICALS,
     RESYNC_INTERVAL,
     supportedTokens,
     BALANCER_API_URL,
@@ -210,7 +193,6 @@ export {
     getBalancesQuery,
     getTrustRelationsQuery,
     getCurrentBackersQuery,
-    getBaseGroupsQuery,
     fetchLatestLiquidityEstimatesQuery,
     getGnosisPoolsCountQuery,
     getGnosisPoolsBatchQuery,
