@@ -1,13 +1,5 @@
 import { Address } from "../interfaces/index.js";
 import {
-  WETH,
-  wstETH,
-  sDAI,
-  WAGNO_GNO,
-  WAGNO_WSTETH,
-  WETH_wstETH_POOL,
-  V3_sDAI_waGnoGNO_POOL,
-  V3_waGnoGNO_waGnowstETH_POOL,
   V2SwapPath,
   V3SwapPathStep,
 } from "./poolConfig.js";
@@ -140,106 +132,6 @@ export function buildV3SwapConfig(
     wrapAaveToken: false,
     aaveToken: "0x0000000000000000000000000000000000000000" as Address,
   };
-}
-
-/**
- * Build forward swap path: wstETH → WETH → s-CRC (Balancer V2)
- * @param sCRC - Address of the source CRC token (ERC20)
- * @param sCRCPool - Pool ID containing s-CRC and WETH
- * @param amountIn - Amount of wstETH to swap
- * @returns Array of SwapConfig for forward path
- */
-export function buildForwardSwapPath(
-  sCRC: Address,
-  sCRCPool: string,
-  amountIn: bigint = 0n
-): SwapConfig[] {
-  // Path: wstETH → WETH → s-CRC
-  const v2Steps: V2SwapPath[] = [
-    {
-      poolId: WETH_wstETH_POOL,
-      tokenIn: wstETH,
-      tokenOut: WETH,
-    },
-    {
-      poolId: sCRCPool,
-      tokenIn: WETH,
-      tokenOut: sCRC,
-    },
-  ];
-
-  return [buildV2SwapConfig(v2Steps, amountIn)];
-}
-
-/**
- * Build backward swap path: g-CRC → sDAI → waGnoGNO → waGnowstETH → wstETH (Balancer V3)
- * @param gCRC - Address of the group CRC token (ERC20)
- * @param amountIn - Amount of g-CRC to swap
- * @param minAmountOut - Minimum wstETH to receive
- * @returns Array of SwapConfig for backward path
- */
-export function buildBackwardSwapPath(
-  gCRC: Address,
-  amountIn: bigint = 0n,
-  minAmountOut: bigint = 0n
-): SwapConfig[] {
-  // Path: g-CRC → sDAI → waGnoGNO → waGnowstETH
-  const v3Steps: V3SwapPathStep[] = [
-    {
-      pool: V3_gCRC_sDAI_POOL,
-      tokenOut: sDAI,
-      isBuffer: false,
-    },
-    {
-      pool: V3_sDAI_waGnoGNO_POOL,
-      tokenOut: WAGNO_GNO,
-      isBuffer: false,
-    },
-    {
-      pool: V3_waGnoGNO_waGnowstETH_POOL,
-      tokenOut: WAGNO_WSTETH,
-      isBuffer: false,
-    },
-  ];
-
-  return [buildV3SwapConfig(gCRC, v3Steps, amountIn, minAmountOut)];
-}
-
-/**
- * Encode complete swap path for testing
- * Useful for verifying the encoding matches what the contract expects
- */
-export function encodeSwapPathForTesting(
-  tokenIn: Address,
-  steps: V3SwapPathStep[],
-  amountIn: bigint,
-  minAmountOut: bigint
-): string {
-  const swapPath: SwapPathExactAmountIn = {
-    tokenIn,
-    steps,
-    exactAmountIn: amountIn,
-    minAmountOut,
-  };
-
-  console.log("Swap Path:", {
-    tokenIn: swapPath.tokenIn,
-    steps: swapPath.steps,
-    exactAmountIn: swapPath.exactAmountIn.toString(),
-    minAmountOut: swapPath.minAmountOut.toString(),
-  });
-
-  return encodeAbiParameters(
-    parseAbiParameters("tuple(address,tuple(address,address,bool)[],uint256,uint256)"),
-    [
-      [
-        swapPath.tokenIn,
-        swapPath.steps.map(s => [s.pool, s.tokenOut, s.isBuffer]),
-        swapPath.exactAmountIn,
-        swapPath.minAmountOut
-      ]
-    ]
-  );
 }
 
 /**
